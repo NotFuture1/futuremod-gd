@@ -5,40 +5,54 @@
 using namespace geode::prelude;
 
 // ---------------------------------------------------------------------------
-// PlayLayer: skip straight to the "Level Complete" screen, cutting the
-// suck-into-the-wall animation AND the dead-air delay before the panel.
+// Skip the level-ending sequence (suck-into-the-wall animation + the dead-air
+// delay) and jump straight to the "Level Complete" panel, on a keypress.
+//
+// The end sequence is kicked off by playEndAnimationToPos (classic) /
+// playPlatformerEndAnimationToPos (platformer). Those mark the "end window".
+// While in that window, the bound key calls showCompleteText() to show the
+// panel immediately. showCompleteText() is guarded so the panel is only ever
+// shown once -- this both prevents a double panel and fixes pressing the key
+// after the panel is already up (which previously re-opened it).
 // ---------------------------------------------------------------------------
 class $modify(SkipEndPlayLayer, PlayLayer) {
     struct Fields {
-        bool m_skipped = false; // only skip once per completion
+        bool m_endActive = false; // has the ending started? (safe-with-jump gate)
+        bool m_shown = false;     // has the complete panel been shown yet?
     };
 
     void resetLevel() {
         PlayLayer::resetLevel();
-        m_fields->m_skipped = false;
+        m_fields->m_endActive = false;
+        m_fields->m_shown = false;
     }
 
-    void skipEnding() {
-        // Only act once the level is actually finishing. This makes the key
-        // safe to share with your jump key: during normal play it does
-        // nothing, but the moment the ending starts it takes you out.
-        if (!m_hasCompletedLevel || m_fields->m_skipped) return;
-        m_fields->m_skipped = true;
+    void playEndAnimationToPos(cocos2d::CCPoint position) {
+        m_fields->m_endActive = true;
+        PlayLayer::playEndAnimationToPos(position);
+    }
 
-        // Kill the end animation (on the layer and on the player icon)...
-        this->stopAllActions();
-        if (m_player1) m_player1->stopAllActions();
-        if (m_player2) m_player2->stopAllActions();
-        // ...cancel the scheduled delay that waits before the panel...
-        this->unscheduleAllSelectors();
-        // ...and show the Level Complete panel right now.
+    void playPlatformerEndAnimationToPos(cocos2d::CCPoint position, bool instant) {
+        m_fields->m_endActive = true;
+        PlayLayer::playPlatformerEndAnimationToPos(position, instant);
+    }
+
+    void showCompleteText() {
+        if (m_fields->m_shown) return; // only ever show the panel once
+        m_fields->m_shown = true;
+        PlayLayer::showCompleteText();
+    }
+
+    // Returns true if it actually skipped (so the key press is consumed).
+    bool requestSkip() {
+        if (!m_fields->m_endActive || m_fields->m_shown) return false;
         this->showCompleteText();
+        return true;
     }
 };
 
 // ---------------------------------------------------------------------------
-// Listen for the rebindable keybind (configured in the mod's settings).
-// Geode 5.x handles keybinds natively, so no external dependency is needed.
+// Rebindable keybind, handled by Geode 5.x natively (no extra dependency).
 // ---------------------------------------------------------------------------
 $execute {
     listenForKeybindSettingPresses(
@@ -46,8 +60,7 @@ $execute {
         [](Keybind const&, bool down, bool repeat, double) -> bool {
             if (down && !repeat) {
                 if (auto pl = PlayLayer::get()) {
-                    if (pl->m_hasCompletedLevel) {
-                        static_cast<SkipEndPlayLayer*>(pl)->skipEnding();
+                    if (static_cast<SkipEndPlayLayer*>(pl)->requestSkip()) {
                         return true; // consume only when we actually skip
                     }
                 }
