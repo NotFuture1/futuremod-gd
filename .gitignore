@@ -1,0 +1,14 @@
+# Build output
+build/
+build-*/
+*.geode
+
+# CMake
+CMakeCache.txt
+CMakeFiles/
+cmake_install.cmake
+
+# Editor / OS
+.vscode/
+.idea/
+.DS_Store

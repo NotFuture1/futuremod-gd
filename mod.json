@@ -1,0 +1,24 @@
+{
+    "geode": "5.7.1",
+    "gd": {
+        "win": "2.2081",
+        "mac": "2.2081",
+        "android": "2.2081"
+    },
+    "version": "v1.0.0",
+    "id": "swift.futuremod",
+    "name": "Future Mod",
+    "developer": "swift",
+    "description": "Press a key to instantly skip the level-ending sequence and jump straight to the Level Complete screen.",
+    "tags": ["gameplay", "utility"],
+    "settings": {
+        "skip-key": {
+            "name": "Skip Key",
+            "description": "Which key skips the ending. Uses a cocos2d key code (13 = Enter, 32 = Space). See README for codes.",
+            "type": "int",
+            "default": 13,
+            "min": 1,
+            "max": 255
+        }
+    }
+}
