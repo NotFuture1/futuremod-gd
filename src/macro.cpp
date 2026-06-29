@@ -38,6 +38,7 @@ struct Macro {
     int step = 0;          // current physics step from level start
     int injected = 0;      // diagnostic: inputs injected this playback
     bool finishedNotified = false;
+    int logBudget = 0;     // diagnostic: limit verbose per-step logging
     std::unordered_map<CheckpointObject*, int> cpStep; // checkpoint -> step (recording)
 
     static Macro& get() { static Macro m; return m; }
@@ -63,7 +64,13 @@ void startRecording() {
 void stopRecording() {
     auto& m = Macro::get();
     m.mode = Mode::Idle;
-    log::info("[macro] recording stopped: {} inputs", m.inputs.size());
+    int lo = m.inputs.empty() ? 0 : m.inputs.front().step;
+    int hi = m.inputs.empty() ? 0 : m.inputs.back().step;
+    log::info("[macro] recording stopped: {} inputs, step range [{}..{}]", m.inputs.size(), lo, hi);
+    for (size_t i = 0; i < m.inputs.size(); i++) {
+        auto const& in = m.inputs[i];
+        log::info("[macro]   rec #{} step={} btn={} down={} p1={}", i, in.step, in.button, in.down, in.player1);
+    }
     notify(fmt::format("Macro: recorded {} inputs", m.inputs.size()), NotificationIcon::Success);
 }
 
@@ -77,8 +84,10 @@ void startPlaying() {
     m.injected = 0;
     m.step = 0;
     m.finishedNotified = false;
+    m.logBudget = 24; // log the first ~24 physics steps' cadence
     pl->resetLevel(); // restart from the top
-    log::info("[macro] playback started: {} inputs queued", m.inputs.size());
+    log::info("[macro] playback started: {} inputs queued, first step={}, last step={}",
+        m.inputs.size(), m.inputs.front().step, m.inputs.back().step);
     notify(fmt::format("Macro: playing {} inputs", m.inputs.size()), NotificationIcon::Info);
 }
 
@@ -106,8 +115,14 @@ class $modify(MacroBGL, GJBaseGameLayer) {
     void processCommands(float dt, bool isHalfTick, bool isLastTick) {
         auto& m = Macro::get();
         if (m.mode == Mode::Playing) {
+            if (m.logBudget > 0) {
+                log::info("[macro] pc mstep={} half={} last={} dt={}", m.step, isHalfTick, isLastTick, dt);
+                m.logBudget--;
+            }
             while (m.playIndex < m.inputs.size() && m.inputs[m.playIndex].step <= m.step) {
                 auto const& in = m.inputs[m.playIndex];
+                log::info("[macro] inject #{} recStep={} atMstep={} btn={} down={}",
+                    m.playIndex, in.step, m.step, in.button, in.down);
                 // call ORIGINAL directly so the injection isn't re-recorded/ignored
                 GJBaseGameLayer::handleButton(in.down, in.button, in.player1);
                 m.injected++;
@@ -141,10 +156,13 @@ class $modify(MacroPlayLayer, PlayLayer) {
             }
             // else: practice respawn -> handled in loadFromCheckpoint
         } else if (m.mode == Mode::Playing) {
+            log::info("[macro] playback attempt ended: reached step {}, injected {}/{}",
+                m.step, m.playIndex, m.inputs.size());
             m.playIndex = 0;
             m.injected = 0;
             m.step = 0;
             m.finishedNotified = false;
+            m.logBudget = 24;
         }
     }
 
