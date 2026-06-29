@@ -9,12 +9,12 @@
     "id": "swift.futuremod",
     "name": "Future Mod",
     "developer": "swift",
-    "description": "Press a key to instantly skip the level-ending sequence and jump straight to the Level Complete screen.",
+    "description": "Press a key while a level is finishing to instantly exit the level, skipping the end animation, delay, and completion screen.",
     "tags": ["gameplay", "utility"],
     "settings": {
         "skip-end": {
-            "name": "Skip Level Ending",
-            "description": "Press this while a level is finishing to instantly jump to the Level Complete screen, skipping the end animation and the delay. Only active during the ending, so it's safe to set to your jump key (e.g. Space).",
+            "name": "Exit Level Ending",
+            "description": "Press this while a level is finishing to instantly exit the level, skipping the end animation, the delay, and the completion screen. The level still counts as completed. Only active during the ending, so it's safe to set to your jump key (e.g. Space).",
             "type": "keybind",
             "category": "gameplay",
             "default": "Space"
