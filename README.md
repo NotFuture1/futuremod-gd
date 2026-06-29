@@ -1,35 +1,32 @@
 # Future Mod — Geometry Dash Geode mod
 
-Press a key to instantly skip the level-ending sequence (the suck-into-the-wall
-animation + the ~3s pause) and jump straight to the **Level Complete** screen.
+Press a key to instantly skip a level's ending — the suck-into-the-wall
+animation **and** the dead-air delay — and jump straight to the **Level
+Complete** screen.
+
+## Setting the key
+
+The keybind is fully rebindable in-game using Geode's native keybind system
+(no extra mods required on Geode 5.x):
+
+**Geode → Future Mod → settings ⚙️ → Skip Level Ending → click the box → press your key.**
+
+Default is **Space**.
+
+## Why Space is safe to use
+
+The skip only fires once a level is **actually finishing** (`m_hasCompletedLevel`).
+During normal play the key behaves normally (so Space still jumps); the instant
+the ending begins, the same key takes you out. If you'd rather it never share
+with jump, just bind it to something else.
 
 ## How it works
 
-- Hooks `PlayLayer::levelComplete()` to know when a level is finishing.
-- On the configured keypress, cancels the scheduled delay and end animation
-  (`unscheduleAllSelectors()` + `stopAllActions()`) and calls
+- A `keybind`-type setting (`skip-end`, category `gameplay`) gives the in-game
+  rebind UI.
+- `listenForKeybindSettingPresses("skip-end", ...)` receives the press.
+- On press during the ending, it stops the end animation on the layer and both
+  players, `unscheduleAllSelectors()` to drop the pre-panel delay, then calls
   `PlayLayer::showCompleteText()` to show the completion screen immediately.
-- The key is read from the mod setting `skip-key` (a cocos2d key code).
 
-## Changing the skip key
-
-Edit it in-game (Geode → Future Mod → settings ⚙️) or in `mod.json`.
-Common cocos2d key codes:
-
-| Key   | Code |
-|-------|------|
-| Enter | 13   |
-| Space | 32   |
-| A     | 65   |
-| Z     | 90   |
-| F     | 70   |
-
-Default is **13 (Enter)**.
-
-## Before you build
-
-- Change `id` / `developer` in `mod.json` from `swift` to your own name.
-- Add a `logo.png` (an icon, ideally 336×336) to the project root — Geode
-  requires one to package the mod.
-
-See `BUILD.md` for full build instructions.
+See `BUILD.md` for build instructions (cloud build via GitHub Actions).

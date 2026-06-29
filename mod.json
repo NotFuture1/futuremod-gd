@@ -12,13 +12,12 @@
     "description": "Press a key to instantly skip the level-ending sequence and jump straight to the Level Complete screen.",
     "tags": ["gameplay", "utility"],
     "settings": {
-        "skip-key": {
-            "name": "Skip Key",
-            "description": "Which key skips the ending. Uses a cocos2d key code (13 = Enter, 32 = Space). See README for codes.",
-            "type": "int",
-            "default": 13,
-            "min": 1,
-            "max": 255
+        "skip-end": {
+            "name": "Skip Level Ending",
+            "description": "Press this while a level is finishing to instantly jump to the Level Complete screen, skipping the end animation and the delay. Only active during the ending, so it's safe to set to your jump key (e.g. Space).",
+            "type": "keybind",
+            "category": "gameplay",
+            "default": "Space"
         }
     }
 }

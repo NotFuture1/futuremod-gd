@@ -1,65 +1,62 @@
 #include <Geode/Geode.hpp>
 #include <Geode/modify/PlayLayer.hpp>
-#include <Geode/modify/CCKeyboardDispatcher.hpp>
+#include <Geode/loader/SettingV3.hpp>
 
 using namespace geode::prelude;
 
 // ---------------------------------------------------------------------------
-// PlayLayer: track when a level is finishing and expose a skip() that jumps
-// straight to the "Level Complete" screen, killing the end animation + delay.
+// PlayLayer: skip straight to the "Level Complete" screen, cutting the
+// suck-into-the-wall animation AND the dead-air delay before the panel.
 // ---------------------------------------------------------------------------
 class $modify(SkipEndPlayLayer, PlayLayer) {
     struct Fields {
-        bool m_completing = false; // are we currently in the end sequence?
-        bool m_skipped = false;    // guard so we only skip once per completion
+        bool m_skipped = false; // only skip once per completion
     };
-
-    void levelComplete() {
-        PlayLayer::levelComplete();
-        // m_hasCompletedLevel is now true and the end animation has started.
-        m_fields->m_completing = true;
-        m_fields->m_skipped = false;
-    }
 
     void resetLevel() {
         PlayLayer::resetLevel();
-        m_fields->m_completing = false;
         m_fields->m_skipped = false;
     }
 
     void skipEnding() {
-        // Only valid while the level is finishing and the screen isn't up yet.
-        if (!m_fields->m_completing || m_fields->m_skipped) return;
-        if (!m_hasCompletedLevel) return;
-
+        // Only act once the level is actually finishing. This makes the key
+        // safe to share with your jump key: during normal play it does
+        // nothing, but the moment the ending starts it takes you out.
+        if (!m_hasCompletedLevel || m_fields->m_skipped) return;
         m_fields->m_skipped = true;
 
-        // Cancel the scheduled "show complete text" delay and stop the
-        // suck-into-the-wall animation actions, then show the screen now.
-        this->unscheduleAllSelectors();
+        // Kill the end animation (on the layer and on the player icon)...
         this->stopAllActions();
+        if (m_player1) m_player1->stopAllActions();
+        if (m_player2) m_player2->stopAllActions();
+        // ...cancel the scheduled delay that waits before the panel...
+        this->unscheduleAllSelectors();
+        // ...and show the Level Complete panel right now.
         this->showCompleteText();
     }
 };
 
 // ---------------------------------------------------------------------------
-// Keyboard: when the configured key goes down, skip the ending if a level is
-// finishing. Self-contained (no extra dependencies).
+// Listen for the rebindable keybind (configured in the mod's settings).
+// Geode 5.x handles keybinds natively, so no external dependency is needed.
 // ---------------------------------------------------------------------------
-class $modify(SkipEndKeyboard, CCKeyboardDispatcher) {
-    bool dispatchKeyboardMSG(enumKeyCodes key, bool down, bool repeat, double delta) {
-        if (down && !repeat) {
-            int wanted = Mod::get()->getSettingValue<int64_t>("skip-key");
-            if (static_cast<int>(key) == wanted) {
+$execute {
+    listenForKeybindSettingPresses(
+        "skip-end",
+        [](Keybind const&, bool down, bool repeat, double) -> bool {
+            if (down && !repeat) {
                 if (auto pl = PlayLayer::get()) {
-                    static_cast<SkipEndPlayLayer*>(pl)->skipEnding();
+                    if (pl->m_hasCompletedLevel) {
+                        static_cast<SkipEndPlayLayer*>(pl)->skipEnding();
+                        return true; // consume only when we actually skip
+                    }
                 }
             }
+            return false; // otherwise let the key do its normal thing (jump)
         }
-        return CCKeyboardDispatcher::dispatchKeyboardMSG(key, down, repeat, delta);
-    }
-};
+    );
+}
 
 $on_mod(Loaded) {
-    log::info("Future Mod loaded - press your skip key to skip level endings.");
+    log::info("Future Mod loaded - bind a key in settings to skip level endings.");
 }
