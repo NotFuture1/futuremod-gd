@@ -2,46 +2,45 @@
 #include <Geode/modify/GJBaseGameLayer.hpp>
 #include <Geode/modify/PlayLayer.hpp>
 #include <Geode/loader/SettingV3.hpp>
+#include <unordered_map>
 
 using namespace geode::prelude;
 
 // ===========================================================================
-// Phase 0 of the frame-perfect analyzer: a deterministic macro record/replay
-// harness.
+// Phase 0 (v2): deterministic macro record/replay, PRACTICE-MODE AWARE.
 //
-// Inputs are indexed by the PHYSICS STEP counter (GJBaseGameLayer::m_currentStep),
-// NOT by wall-clock time. This is what makes recording while the game is slowed
-// down (speedhack / other mods) work correctly: slowing the game only changes
-// how fast steps elapse in real time, never the step *sequence*. A click on
-// step N is replayed on step N at any playback speed.
+// Inputs are indexed by a physics-step counter we maintain ourselves
+// (incremented once per GJBaseGameLayer::processCommands, which runs once per
+// 240 TPS physics step). This is independent of game speed, so recording while
+// the game is slowed down by other mods still lands clicks on the right steps.
 //
-// Steps are stored RELATIVE to the start of the attempt (a baseline captured
-// right after resetLevel), so the macro is independent of any global step
-// counter offset.
+// Practice mode: when you place a checkpoint we remember the step it was at;
+// when you die and respawn at a checkpoint we rewind our step counter to it and
+// DROP the inputs from the failed attempt after that checkpoint. The result is
+// a macro stitched only from the segments you actually clear.
 // ===========================================================================
 
 namespace {
 
-enum class MacroMode { Idle, Recording, Playing };
+enum class Mode { Idle, Recording, Playing };
 
 struct InputEdge {
-    int step;     // physics step, relative to attempt start
-    int button;   // PlayerButton (1 = jump, 2 = left, 3 = right) -- round-tripped
-    bool player1; // which player
-    bool down;    // press (true) or release (false)
+    int step;     // physics step from level start
+    int button;   // PlayerButton (round-tripped; 1 = jump)
+    bool player1;
+    bool down;    // press / release
 };
 
 struct Macro {
-    MacroMode mode = MacroMode::Idle;
+    Mode mode = Mode::Idle;
     std::vector<InputEdge> inputs;
     size_t playIndex = 0;
-    int baseStep = 0;        // m_currentStep at the start of the attempt
+    int step = 0;          // current physics step from level start
+    int injected = 0;      // diagnostic: inputs injected this playback
     bool finishedNotified = false;
+    std::unordered_map<CheckpointObject*, int> cpStep; // checkpoint -> step (recording)
 
-    static Macro& get() {
-        static Macro inst;
-        return inst;
-    }
+    static Macro& get() { static Macro m; return m; }
 };
 
 void notify(std::string const& msg, NotificationIcon icon) {
@@ -52,15 +51,19 @@ void startRecording() {
     auto pl = PlayLayer::get();
     if (!pl) { notify("Macro: enter a level first", NotificationIcon::Error); return; }
     auto& m = Macro::get();
-    m.mode = MacroMode::Recording;
+    m.mode = Mode::Recording;
     m.inputs.clear();
-    pl->resetLevel(); // restart the attempt; resetLevel hook sets baseStep
-    notify("Macro: recording (restarts on death)", NotificationIcon::Info);
+    m.cpStep.clear();
+    m.step = 0;
+    pl->resetLevel(); // start the attempt fresh from the top
+    log::info("[macro] recording started");
+    notify("Macro: recording (practice-aware)", NotificationIcon::Info);
 }
 
 void stopRecording() {
     auto& m = Macro::get();
-    m.mode = MacroMode::Idle;
+    m.mode = Mode::Idle;
+    log::info("[macro] recording stopped: {} inputs", m.inputs.size());
     notify(fmt::format("Macro: recorded {} inputs", m.inputs.size()), NotificationIcon::Success);
 }
 
@@ -69,85 +72,116 @@ void startPlaying() {
     if (!pl) { notify("Macro: enter a level first", NotificationIcon::Error); return; }
     auto& m = Macro::get();
     if (m.inputs.empty()) { notify("Macro: nothing recorded yet", NotificationIcon::Error); return; }
-    m.mode = MacroMode::Playing;
+    m.mode = Mode::Playing;
     m.playIndex = 0;
+    m.injected = 0;
+    m.step = 0;
     m.finishedNotified = false;
-    pl->resetLevel(); // restart from the top; resetLevel hook sets baseStep
+    pl->resetLevel(); // restart from the top
+    log::info("[macro] playback started: {} inputs queued", m.inputs.size());
     notify(fmt::format("Macro: playing {} inputs", m.inputs.size()), NotificationIcon::Info);
 }
 
 void stopPlaying() {
-    auto& m = Macro::get();
-    m.mode = MacroMode::Idle;
+    Macro::get().mode = Mode::Idle;
     notify("Macro: playback stopped", NotificationIcon::Info);
 }
 
 } // namespace
 
 // ---------------------------------------------------------------------------
-// Record real inputs / inject recorded inputs at the physics-step level.
+// Input record / inject at the physics-step level.
 // ---------------------------------------------------------------------------
 class $modify(MacroBGL, GJBaseGameLayer) {
-    // handleButton is GD's "apply this button" entry point (press/release).
     void handleButton(bool down, int button, bool isPlayer1) {
         auto& m = Macro::get();
-        if (m.mode == MacroMode::Recording) {
-            m.inputs.push_back({ this->m_currentStep - m.baseStep, button, isPlayer1, down });
-            // keep playing while recording -- fall through to apply it
-        } else if (m.mode == MacroMode::Playing) {
+        if (m.mode == Mode::Recording) {
+            m.inputs.push_back({ m.step, button, isPlayer1, down });
+        } else if (m.mode == Mode::Playing) {
             return; // ignore the real user's input during playback
         }
         GJBaseGameLayer::handleButton(down, button, isPlayer1);
     }
 
-    // processCommands runs once per physics step; m_currentStep identifies it.
-    // We fire any recorded inputs scheduled for the current step before the
-    // step's physics runs, mirroring how real inputs are consumed.
     void processCommands(float dt, bool isHalfTick, bool isLastTick) {
         auto& m = Macro::get();
-        if (m.mode == MacroMode::Playing) {
-            int cur = this->m_currentStep - m.baseStep;
-            while (m.playIndex < m.inputs.size() && m.inputs[m.playIndex].step <= cur) {
+        if (m.mode == Mode::Playing) {
+            while (m.playIndex < m.inputs.size() && m.inputs[m.playIndex].step <= m.step) {
                 auto const& in = m.inputs[m.playIndex];
-                // call the ORIGINAL directly so this injection isn't re-recorded
+                // call ORIGINAL directly so the injection isn't re-recorded/ignored
                 GJBaseGameLayer::handleButton(in.down, in.button, in.player1);
+                m.injected++;
                 m.playIndex++;
             }
             if (!m.finishedNotified && m.playIndex >= m.inputs.size() && !m.inputs.empty()) {
                 m.finishedNotified = true;
-                notify("Macro: all inputs played", NotificationIcon::Info);
+                log::info("[macro] all inputs injected ({} total)", m.injected);
+                notify(fmt::format("Macro: injected {} inputs", m.injected), NotificationIcon::Info);
             }
         }
         GJBaseGameLayer::processCommands(dt, isHalfTick, isLastTick);
+        if (m.mode != Mode::Idle) m.step++; // advance after the step
     }
 };
 
 // ---------------------------------------------------------------------------
-// Capture the per-attempt step baseline; restart record/replay on each attempt.
+// Per-attempt + practice-checkpoint bookkeeping.
 // ---------------------------------------------------------------------------
 class $modify(MacroPlayLayer, PlayLayer) {
     void resetLevel() {
         PlayLayer::resetLevel();
         auto& m = Macro::get();
-        if (m.mode == MacroMode::Recording) {
-            // a fresh attempt -> record it from scratch (captures the run you clear)
-            m.inputs.clear();
-            m.baseStep = this->m_currentStep;
-        } else if (m.mode == MacroMode::Playing) {
+        int cpCount = m_checkpointArray ? m_checkpointArray->count() : 0;
+        if (m.mode == Mode::Recording) {
+            if (cpCount == 0) {
+                // full restart from the top -> fresh recording
+                m.inputs.clear();
+                m.cpStep.clear();
+                m.step = 0;
+            }
+            // else: practice respawn -> handled in loadFromCheckpoint
+        } else if (m.mode == Mode::Playing) {
             m.playIndex = 0;
-            m.baseStep = this->m_currentStep;
+            m.injected = 0;
+            m.step = 0;
             m.finishedNotified = false;
+        }
+    }
+
+    CheckpointObject* markCheckpoint() {
+        auto cp = PlayLayer::markCheckpoint();
+        auto& m = Macro::get();
+        if (m.mode == Mode::Recording && cp) {
+            m.cpStep[cp] = m.step;
+            log::info("[macro] checkpoint @ step {}", m.step);
+        }
+        return cp;
+    }
+
+    void loadFromCheckpoint(CheckpointObject* cp) {
+        PlayLayer::loadFromCheckpoint(cp);
+        auto& m = Macro::get();
+        if (m.mode == Mode::Recording && cp) {
+            auto it = m.cpStep.find(cp);
+            if (it != m.cpStep.end()) {
+                m.step = it->second;
+                // drop the failed attempt's inputs recorded after this checkpoint
+                while (!m.inputs.empty() && m.inputs.back().step >= m.step) {
+                    m.inputs.pop_back();
+                }
+                log::info("[macro] respawn -> rewound to step {} ({} inputs kept)", m.step, m.inputs.size());
+            }
         }
     }
 };
 
 // ---------------------------------------------------------------------------
-// Keybinds (rebindable, Geode-native): toggle record / toggle play.
+// Rebindable keybinds: toggle record / toggle play.
 // ---------------------------------------------------------------------------
 $execute {
     listenForKeybindSettingPresses("macro-record", [](Keybind const&, bool down, bool repeat, double) -> bool {
         if (down && !repeat) {
-            if (Macro::get().mode == MacroMode::Recording) stopRecording();
+            if (Macro::get().mode == Mode::Recording) stopRecording();
             else startRecording();
             return true;
         }
@@ -155,7 +189,7 @@ $execute {
     });
     listenForKeybindSettingPresses("macro-play", [](Keybind const&, bool down, bool repeat, double) -> bool {
         if (down && !repeat) {
-            if (Macro::get().mode == MacroMode::Playing) stopPlaying();
+            if (Macro::get().mode == Mode::Playing) stopPlaying();
             else startPlaying();
             return true;
         }
