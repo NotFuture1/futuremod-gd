@@ -18,6 +18,24 @@
             "type": "keybind",
             "category": "gameplay",
             "default": "Space"
+        },
+        "macro-title": {
+            "name": "Macro (frame-perfect analyzer, Phase 0)",
+            "type": "title"
+        },
+        "macro-record": {
+            "name": "Macro: Record",
+            "description": "Toggle recording your inputs as a step-indexed macro. Because it indexes by physics step (not time), recording while the game is slowed down by other mods still captures clicks correctly. Recording restarts on death, so it captures the attempt you actually complete.",
+            "type": "keybind",
+            "category": "gameplay",
+            "default": "J"
+        },
+        "macro-play": {
+            "name": "Macro: Play",
+            "description": "Toggle replaying the recorded macro from the start of the attempt.",
+            "type": "keybind",
+            "category": "gameplay",
+            "default": "K"
         }
     }
 }
