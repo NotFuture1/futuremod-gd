@@ -84,7 +84,7 @@ void startPlaying() {
     m.injected = 0;
     m.step = 0;
     m.finishedNotified = false;
-    m.logBudget = 24; // log the first ~24 physics steps' cadence
+    m.logBudget = 45; // log the first ~24 physics steps' cadence
     pl->resetLevel(); // restart from the top
     log::info("[macro] playback started: {} inputs queued, first step={}, last step={}",
         m.inputs.size(), m.inputs.front().step, m.inputs.back().step);
@@ -115,16 +115,22 @@ class $modify(MacroBGL, GJBaseGameLayer) {
     void processCommands(float dt, bool isHalfTick, bool isLastTick) {
         auto& m = Macro::get();
         if (m.mode == Mode::Playing) {
-            if (m.logBudget > 0) {
-                log::info("[macro] pc mstep={} half={} last={} dt={}", m.step, isHalfTick, isLastTick, dt);
-                m.logBudget--;
-            }
             while (m.playIndex < m.inputs.size() && m.inputs[m.playIndex].step <= m.step) {
                 auto const& in = m.inputs[m.playIndex];
-                log::info("[macro] inject #{} recStep={} atMstep={} btn={} down={}",
-                    m.playIndex, in.step, m.step, in.button, in.down);
-                // call ORIGINAL directly so the injection isn't re-recorded/ignored
-                GJBaseGameLayer::handleButton(in.down, in.button, in.player1);
+                // Inject at the PLAYER level (pushButton/releaseButton) -- the
+                // low-level "make the player jump" call. handleButton() did not
+                // actually move the player when called from here.
+                PlayerObject* p = in.player1 ? m_player1 : m_player2;
+                if (p) {
+                    auto btn = static_cast<PlayerButton>(in.button);
+                    if (in.down) p->pushButton(btn);
+                    else p->releaseButton(btn);
+                }
+                if (m.logBudget > 0) {
+                    log::info("[macro] inject #{} recStep={} atMstep={} btn={} down={} player={}",
+                        m.playIndex, in.step, m.step, in.button, in.down, p ? 1 : 0);
+                    m.logBudget--;
+                }
                 m.injected++;
                 m.playIndex++;
             }
@@ -162,7 +168,7 @@ class $modify(MacroPlayLayer, PlayLayer) {
             m.injected = 0;
             m.step = 0;
             m.finishedNotified = false;
-            m.logBudget = 24;
+            m.logBudget = 45;
         }
     }
 
