@@ -6,6 +6,7 @@
 #include <vector>
 #include <string>
 #include <sstream>
+#include <algorithm>
 #include <cmath>
 
 using namespace geode::prelude;
@@ -64,14 +65,38 @@ struct Macro {
     int deathStep = -1;
     int c240 = 0, c120 = 0, c60 = 0;
 
+    // analysis results that persist for the live playback tally
+    std::vector<std::pair<int, int>> savedWindows; // (input index, window ticks)
+    // live playback tally: sorted steps of frame-perfect jumps per rate
+    std::vector<int> fp240, fp120, fp60;
+    size_t pi240 = 0, pi120 = 0, pi60 = 0;
+
     static Macro& get() { static Macro m; return m; }
 
     std::filesystem::path path() { return Mod::get()->getSaveDir() / "macro.txt"; }
 
+    void buildFpLists() {
+        fp240.clear(); fp120.clear(); fp60.clear();
+        for (auto const& pr : savedWindows) {
+            int idx = pr.first, w = pr.second;
+            if (idx < 0 || idx >= static_cast<int>(inputs.size())) continue;
+            int st = inputs[idx].step;
+            if (w <= 1) fp240.push_back(st);
+            if (w <= 2) fp120.push_back(st);
+            if (w <= 4) fp60.push_back(st);
+        }
+        std::sort(fp240.begin(), fp240.end());
+        std::sort(fp120.begin(), fp120.end());
+        std::sort(fp60.begin(), fp60.end());
+        pi240 = pi120 = pi60 = 0;
+    }
+
     void save() {
-        std::string out = fmt::format("FUTUREMOD_MACRO v1\n{} {}\n", seed1, seed2);
+        std::string out = fmt::format("FUTUREMOD_MACRO v2\n{} {}\n", seed1, seed2);
         for (auto const& in : inputs)
             out += fmt::format("{} {} {} {}\n", in.step, in.button, in.player1 ? 1 : 0, in.down ? 1 : 0);
+        for (auto const& pr : savedWindows)
+            out += fmt::format("W {} {}\n", pr.first, pr.second);
         auto res = file::writeString(path(), out);
         if (!res) log::warn("[macro] save failed: {}", res.unwrapErr());
     }
@@ -83,6 +108,7 @@ struct Macro {
         std::string line;
         if (!std::getline(ss, line) || line.rfind("FUTUREMOD_MACRO", 0) != 0) return;
         inputs.clear();
+        savedWindows.clear();
         if (std::getline(ss, line)) {
             std::istringstream s2(line);
             s2 >> seed1 >> seed2;
@@ -90,12 +116,18 @@ struct Macro {
         }
         while (std::getline(ss, line)) {
             if (line.empty()) continue;
-            std::istringstream s3(line);
-            int step, btn, p1, dn;
-            if (s3 >> step >> btn >> p1 >> dn)
-                inputs.push_back({ step, btn, (bool)p1, (bool)dn });
+            if (line[0] == 'W') {
+                std::istringstream sw(line);
+                std::string tag; int idx, w;
+                if (sw >> tag >> idx >> w) savedWindows.push_back({ idx, w });
+            } else {
+                std::istringstream s3(line);
+                int step, btn, p1, dn;
+                if (s3 >> step >> btn >> p1 >> dn)
+                    inputs.push_back({ step, btn, (bool)p1, (bool)dn });
+            }
         }
-        log::info("[macro] loaded {} inputs from disk", inputs.size());
+        log::info("[macro] loaded {} inputs, {} analyzed windows", inputs.size(), savedWindows.size());
     }
 };
 
@@ -112,6 +144,23 @@ void updateHud() {
     auto& m = Macro::get();
     auto pl = PlayLayer::get();
     if (!pl) return;
+
+    bool s240 = Mod::get()->getSettingValue<bool>("show-240");
+    bool s120 = Mod::get()->getSettingValue<bool>("show-120");
+    bool s60  = Mod::get()->getSettingValue<bool>("show-60");
+    if (!s240 && !s120 && !s60) s240 = true;
+
+    std::string s;
+    if (m.mode == Mode::Analyzing) {
+        if (s240) s += fmt::format("FP@240: {}\n", m.c240);
+        if (s120) s += fmt::format("FP@120: {}\n", m.c120);
+        if (s60)  s += fmt::format("FP@60: {}",   m.c60);
+    } else { // playback live tally: passed / total
+        if (s240) s += fmt::format("FP@240: {}/{}\n", m.pi240, m.fp240.size());
+        if (s120) s += fmt::format("FP@120: {}/{}\n", m.pi120, m.fp120.size());
+        if (s60)  s += fmt::format("FP@60: {}/{}",    m.pi60,  m.fp60.size());
+    }
+
     // Look the label up by tag on the CURRENT PlayLayer each time -- never hold
     // a raw pointer across levels (the layer frees its children on exit).
     constexpr int kHudTag = 0x4D504650; // 'MPFP'
@@ -127,14 +176,6 @@ void updateHud() {
         hud->setZOrder(10000);
         pl->addChild(hud);
     }
-    bool s240 = Mod::get()->getSettingValue<bool>("show-240");
-    bool s120 = Mod::get()->getSettingValue<bool>("show-120");
-    bool s60  = Mod::get()->getSettingValue<bool>("show-60");
-    if (!s240 && !s120 && !s60) s240 = true;
-    std::string s;
-    if (s240) s += fmt::format("FP@240: {}\n", m.c240);
-    if (s120) s += fmt::format("FP@120: {}\n", m.c120);
-    if (s60)  s += fmt::format("FP@60: {}",   m.c60);
     hud->setString(s.c_str());
 }
 
@@ -173,7 +214,9 @@ void startPlaying() {
     m.finishedNotified = false;
     m.maxDrift = 0.f;
     m.maxDriftStep = -1;
+    m.buildFpLists(); // live frame-perfect tally from the last analysis
     pl->resetLevel();
+    if (!m.savedWindows.empty()) updateHud();
     notify(fmt::format("Macro: playing {} inputs", m.inputs.size()), NotificationIcon::Info);
 }
 
@@ -198,10 +241,14 @@ void beginTest() {
 void finishAnalysis() {
     auto& m = Macro::get();
     m.mode = Mode::Idle;
-    for (size_t i = 0; i < m.targets.size(); i++)
+    m.savedWindows.clear();
+    for (size_t i = 0; i < m.targets.size(); i++) {
         log::info("[fp] input #{} step {} window={} ticks",
             m.targets[i], m.inputs[m.targets[i]].step, m.windowTicks[i]);
+        m.savedWindows.push_back({ static_cast<int>(m.targets[i]), m.windowTicks[i] });
+    }
     log::info("[fp] DONE -> 240:{} 120:{} 60:{}", m.c240, m.c120, m.c60);
+    m.save(); // persist windows so the live playback tally survives restarts
     updateHud();
     playDing();
     notify(fmt::format("Analysis done. 240:{} 120:{} 60:{}", m.c240, m.c120, m.c60), NotificationIcon::Success);
@@ -339,13 +386,20 @@ class $modify(MacroBGL, GJBaseGameLayer) {
             if (static_cast<int>(m.track.size()) <= m.step)
                 m.track.resize(m.step + 1, { pos.x, pos.y });
             m.track[m.step] = { pos.x, pos.y };
-        } else if (m.mode == Mode::Playing && m_player1 &&
-                   m.step >= 0 && m.step < static_cast<int>(m.track.size())) {
-            auto pos = m_player1->getPosition();
-            auto rec = m.track[m.step];
-            float dx = pos.x - rec.first, dy = pos.y - rec.second;
-            float drift = std::sqrt(dx * dx + dy * dy);
-            if (drift > m.maxDrift) { m.maxDrift = drift; m.maxDriftStep = m.step; }
+        } else if (m.mode == Mode::Playing) {
+            if (m_player1 && m.step >= 0 && m.step < static_cast<int>(m.track.size())) {
+                auto pos = m_player1->getPosition();
+                auto rec = m.track[m.step];
+                float dx = pos.x - rec.first, dy = pos.y - rec.second;
+                float drift = std::sqrt(dx * dx + dy * dy);
+                if (drift > m.maxDrift) { m.maxDrift = drift; m.maxDriftStep = m.step; }
+            }
+            // live frame-perfect tally: count + ding as we pass each FP jump
+            bool advanced = false;
+            while (m.pi240 < m.fp240.size() && m.fp240[m.pi240] <= m.step) { m.pi240++; advanced = true; }
+            while (m.pi120 < m.fp120.size() && m.fp120[m.pi120] <= m.step) { m.pi120++; advanced = true; }
+            while (m.pi60  < m.fp60.size()  && m.fp60[m.pi60]   <= m.step) { m.pi60++;  advanced = true; }
+            if (advanced) { playDing(); updateHud(); }
         } else if (m.mode == Mode::Analyzing && !m.testResolved) {
             if (m.died) {
                 m.testResolved = true;
@@ -403,6 +457,7 @@ class $modify(MacroPlayLayer, PlayLayer) {
             m.finishedNotified = false;
             m.maxDrift = 0.f;
             m.maxDriftStep = -1;
+            m.pi240 = m.pi120 = m.pi60 = 0; // restart the live tally
             if (m.haveSeed) { m_randomSeed = m.seed1; m_replayRandSeed = m.seed2; }
         } else if (m.mode == Mode::Analyzing) {
             m.playIndex = 0;
