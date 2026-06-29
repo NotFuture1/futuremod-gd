@@ -310,6 +310,16 @@ The headline "frame perfect count" = true press/release inputs with window 1.
    activations as `truePress / trueRelease / bufferedActivation / free`; headline
    count = true press/release with 240-window == 1.
 
+## 10b. Analyzer display requirement (locked)
+
+The frame-perfect readout must have a **configurable rate display**: the user
+multi-selects any of **60 / 120 / 240** and the analyzer shows the frame-perfect
+count/window at **each selected rate**. Internally everything is measured at the
+240 TPS tick; the 120 and 60 figures are derived by grouping ticks (a window of
+N ticks at 240 = N/2 at 120 = N/4 at 60; "frame perfect" at rate R = window ≤
+one R-frame). So one analysis pass yields all three; the setting just controls
+which columns are shown.
+
 ## 11. Phase 0 — concrete first build
 
 1. Internal `Macro` representation: `vector<InputEdge { uint32 step; uint8
