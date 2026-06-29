@@ -13,21 +13,18 @@ using namespace geode::prelude;
 // ===========================================================================
 // Macro record/replay + frame-perfect analyzer.
 //
-// - Inputs indexed by GAME-TIME (step = round(gameTime*240)) so recording while
-//   slowed down maps to the same step at normal speed.
-// - Injected via PlayerObject::pushButton/releaseButton in processQueuedButtons.
-// - Disk persistence, RNG seed lock, desync detector.
-// - Analyzer: for each press, shift it +/- k ticks and re-run (fast-forwarded);
-//   the widest unbroken surviving range = the timing window. window<=1 tick is
-//   frame-perfect at 240, <=2 at 120, <=4 at 60.
+// Analyzer: replay the run unshifted (baseline) to confirm it's deterministic,
+// then for each press shift it +/- k ticks and re-run; the widest unbroken
+// surviving range = the timing window. window<=1 tick = frame-perfect@240,
+// <=2 = @120, <=4 = @60. Live HUD (top-right) + sound while it runs.
 // ===========================================================================
 
 namespace {
 
-constexpr int kMargin = 48;  // ticks past the input to confirm "survived"
-constexpr int kMaxK   = 8;   // max offset tested each direction
-constexpr int kFF     = 6;   // analysis fast-forward factor
-constexpr int kCap    = 6000; // safety cap on total test runs
+constexpr int kMargin = 48;
+constexpr int kMaxK   = 8;
+constexpr int kFF     = 6;
+constexpr int kCap    = 8000;
 
 enum class Mode { Idle, Recording, Playing, Analyzing };
 
@@ -45,27 +42,28 @@ struct Macro {
     int step = 0;
     double gameTime = 0;
 
-    // determinism
     uint64_t seed1 = 0, seed2 = 0;
     bool haveSeed = false;
 
-    // desync detection
+    // desync detection (playback)
     std::vector<std::pair<float, float>> track;
     float maxDrift = 0.f;
     int maxDriftStep = -1;
-    int desyncSteps = 0;
     bool finishedNotified = false;
 
-    // practice checkpoints
     std::unordered_map<CheckpointObject*, int> cpStep;
 
     // --- analyzer ---
-    std::vector<size_t> targets;   // input indices to probe (presses)
-    std::vector<int> windowTicks;  // result window per target
+    std::vector<size_t> targets;
+    std::vector<int> windowTicks;
     size_t targetIdx = 0;
     int offset = 0, dir = 0, minSurv = 0, maxSurv = 0;
-    int marginEnd = 0, testCount = 0;
+    int marginEnd = 0, testCount = 0, lastTargetStep = 0;
+    bool baseline = false;
     bool died = false, testResolved = false, lastSurvived = false;
+    int deathStep = -1;
+    int c240 = 0, c120 = 0, c60 = 0;
+    CCLabelBMFont* hud = nullptr;
 
     static Macro& get() { static Macro m; return m; }
 
@@ -106,7 +104,36 @@ void notify(std::string const& msg, NotificationIcon icon) {
     Notification::create(msg, icon)->show();
 }
 
-// ---- recording / playback control ----------------------------------------
+void playDing() {
+    if (auto fae = FMODAudioEngine::sharedEngine())
+        fae->playEffect("achievement_01.ogg");
+}
+
+void updateHud() {
+    auto& m = Macro::get();
+    auto pl = PlayLayer::get();
+    if (!pl) return;
+    if (!m.hud || !m.hud->getParent()) {
+        m.hud = CCLabelBMFont::create("", "bigFont.fnt");
+        m.hud->setAnchorPoint({ 1.f, 1.f });
+        auto win = CCDirector::sharedDirector()->getWinSize();
+        m.hud->setPosition(win.width - 6.f, win.height - 6.f);
+        m.hud->setScale(0.45f);
+        m.hud->setZOrder(10000);
+        pl->addChild(m.hud);
+    }
+    bool s240 = Mod::get()->getSettingValue<bool>("show-240");
+    bool s120 = Mod::get()->getSettingValue<bool>("show-120");
+    bool s60  = Mod::get()->getSettingValue<bool>("show-60");
+    if (!s240 && !s120 && !s60) s240 = true;
+    std::string s;
+    if (s240) s += fmt::format("FP@240: {}\n", m.c240);
+    if (s120) s += fmt::format("FP@120: {}\n", m.c120);
+    if (s60)  s += fmt::format("FP@60: {}",   m.c60);
+    m.hud->setString(s.c_str());
+}
+
+// ---- recording / playback --------------------------------------------------
 
 void startRecording() {
     auto pl = PlayLayer::get();
@@ -141,7 +168,6 @@ void startPlaying() {
     m.finishedNotified = false;
     m.maxDrift = 0.f;
     m.maxDriftStep = -1;
-    m.desyncSteps = 0;
     pl->resetLevel();
     notify(fmt::format("Macro: playing {} inputs", m.inputs.size()), NotificationIcon::Info);
 }
@@ -157,33 +183,23 @@ void beginTest() {
     auto& m = Macro::get();
     m.testResolved = false;
     m.died = false;
-    int tstep = m.inputs[m.targets[m.targetIdx]].step;
-    m.marginEnd = tstep + kMargin;
+    m.deathStep = -1;
+    m.marginEnd = m.baseline
+        ? (m.lastTargetStep + kMargin)
+        : (m.inputs[m.targets[m.targetIdx]].step + kMargin);
     if (auto pl = PlayLayer::get()) pl->resetLevel();
 }
 
 void finishAnalysis() {
     auto& m = Macro::get();
     m.mode = Mode::Idle;
-    bool s240 = Mod::get()->getSettingValue<bool>("show-240");
-    bool s120 = Mod::get()->getSettingValue<bool>("show-120");
-    bool s60  = Mod::get()->getSettingValue<bool>("show-60");
-    if (!s240 && !s120 && !s60) s240 = true;
-
-    int c240 = 0, c120 = 0, c60 = 0;
-    for (size_t i = 0; i < m.targets.size(); i++) {
-        int w = m.windowTicks[i];
-        if (w <= 1) c240++;
-        if (w <= 2) c120++;
-        if (w <= 4) c60++;
-        log::info("[fp] input #{} step {} window={} ticks", m.targets[i], m.inputs[m.targets[i]].step, w);
-    }
-    std::string disp;
-    if (s240) disp += fmt::format("240:{}  ", c240);
-    if (s120) disp += fmt::format("120:{}  ", c120);
-    if (s60)  disp += fmt::format("60:{}", c60);
-    log::info("[fp] frame perfects -> {}", disp);
-    notify(fmt::format("Frame perfects  {}", disp), NotificationIcon::Success);
+    for (size_t i = 0; i < m.targets.size(); i++)
+        log::info("[fp] input #{} step {} window={} ticks",
+            m.targets[i], m.inputs[m.targets[i]].step, m.windowTicks[i]);
+    log::info("[fp] DONE -> 240:{} 120:{} 60:{}", m.c240, m.c120, m.c60);
+    updateHud();
+    playDing();
+    notify(fmt::format("Analysis done. 240:{} 120:{} 60:{}", m.c240, m.c120, m.c60), NotificationIcon::Success);
 }
 
 void advanceAnalysis(bool survived) {
@@ -191,15 +207,15 @@ void advanceAnalysis(bool survived) {
     if (++m.testCount > kCap) { log::warn("[fp] hit test cap"); finishAnalysis(); return; }
 
     bool finalize = false;
-    if (m.dir < 0) { // probing earlier
+    if (m.dir < 0) {
         if (survived) {
             m.minSurv = m.offset;
             m.offset -= 1;
             if (m.offset < -kMaxK) { m.dir = 1; m.offset = 1; }
         } else {
-            m.dir = 1; m.offset = 1; // earlier boundary found
+            m.dir = 1; m.offset = 1;
         }
-    } else {          // probing later
+    } else {
         if (survived) {
             m.maxSurv = m.offset;
             m.offset += 1;
@@ -210,12 +226,37 @@ void advanceAnalysis(bool survived) {
     }
 
     if (finalize) {
-        m.windowTicks[m.targetIdx] = m.maxSurv - m.minSurv + 1;
+        int w = m.maxSurv - m.minSurv + 1;
+        m.windowTicks[m.targetIdx] = w;
+        if (w <= 1) m.c240++;
+        if (w <= 2) m.c120++;
+        if (w <= 4) m.c60++;
+        if (w <= 1) playDing();
+        updateHud();
         m.targetIdx++;
         if (m.targetIdx >= m.targets.size()) { finishAnalysis(); return; }
         m.dir = -1; m.offset = -1; m.minSurv = 0; m.maxSurv = 0;
     }
     beginTest();
+}
+
+void onTestResolved() {
+    auto& m = Macro::get();
+    if (m.baseline) {
+        m.baseline = false;
+        if (!m.lastSurvived) {
+            m.mode = Mode::Idle;
+            log::warn("[fp] baseline desynced @ step {}", m.deathStep);
+            notify(fmt::format("Analyze aborted: replay desynced @ step {}. Turn OFF speedhack/noclip/CBF.", m.deathStep),
+                NotificationIcon::Error);
+            return;
+        }
+        // baseline clean -> start probing the first target
+        m.targetIdx = 0; m.dir = -1; m.offset = -1; m.minSurv = 0; m.maxSurv = 0;
+        beginTest();
+        return;
+    }
+    advanceAnalysis(m.lastSurvived);
 }
 
 void startAnalysis() {
@@ -227,11 +268,15 @@ void startAnalysis() {
     for (size_t i = 0; i < m.inputs.size(); i++)
         if (m.inputs[i].down) m.targets.push_back(i);
     if (m.targets.empty()) { notify("Analyze: no press inputs", NotificationIcon::Error); return; }
-    m.windowTicks.assign(m.targets.size(), 1);
-    m.targetIdx = 0; m.dir = -1; m.offset = -1; m.minSurv = 0; m.maxSurv = 0; m.testCount = 0;
+    m.windowTicks.assign(m.targets.size(), 0);
+    m.lastTargetStep = m.inputs[m.targets.back()].step;
+    m.testCount = 0;
+    m.c240 = m.c120 = m.c60 = 0;
+    m.baseline = true;       // first run is the unshifted determinism check
     m.mode = Mode::Analyzing;
-    notify(fmt::format("Analyzing {} inputs... (turn OFF noclip/speedhack)", m.targets.size()), NotificationIcon::Info);
-    beginTest();
+    updateHud();
+    notify(fmt::format("Analyzing {} jumps... TURN OFF speedhack/noclip", m.targets.size()), NotificationIcon::Info);
+    beginTest(); // baseline run
 }
 
 } // namespace
@@ -243,7 +288,7 @@ class $modify(MacroBGL, GJBaseGameLayer) {
         if (m.mode == Mode::Recording) {
             m.inputs.push_back({ m.step, button, isPlayer1, down });
         } else if (m.mode == Mode::Playing || m.mode == Mode::Analyzing) {
-            return; // ignore the real user during playback/analysis
+            return;
         }
         GJBaseGameLayer::handleButton(down, button, isPlayer1);
     }
@@ -251,7 +296,7 @@ class $modify(MacroBGL, GJBaseGameLayer) {
     void processQueuedButtons(float dt, bool clearQueue) {
         auto& m = Macro::get();
         if (m.mode == Mode::Playing || m.mode == Mode::Analyzing) {
-            int target = (m.mode == Mode::Analyzing && !m.targets.empty())
+            int target = (m.mode == Mode::Analyzing && !m.baseline && !m.targets.empty())
                 ? static_cast<int>(m.targets[m.targetIdx]) : -1;
             while (m.playIndex < m.inputs.size()) {
                 int eff = m.inputs[m.playIndex].step
@@ -295,11 +340,22 @@ class $modify(MacroBGL, GJBaseGameLayer) {
             auto rec = m.track[m.step];
             float dx = pos.x - rec.first, dy = pos.y - rec.second;
             float drift = std::sqrt(dx * dx + dy * dy);
-            if (drift > 1.f) m.desyncSteps++;
             if (drift > m.maxDrift) { m.maxDrift = drift; m.maxDriftStep = m.step; }
         } else if (m.mode == Mode::Analyzing && !m.testResolved) {
-            if (m.died) { m.testResolved = true; m.lastSurvived = false; }
-            else if (m.step >= m.marginEnd) { m.testResolved = true; m.lastSurvived = true; }
+            if (m.died) {
+                m.testResolved = true;
+                if (m.baseline) {
+                    m.lastSurvived = false; // baseline must not die
+                } else {
+                    // a death only counts against this jump if we actually reached it;
+                    // an earlier death is upstream desync, not the shift's doing.
+                    int tstep = m.inputs[m.targets[m.targetIdx]].step;
+                    m.lastSurvived = (m.deathStep < tstep);
+                }
+            } else if (m.step >= m.marginEnd) {
+                m.testResolved = true;
+                m.lastSurvived = true;
+            }
         }
     }
 
@@ -310,7 +366,7 @@ class $modify(MacroBGL, GJBaseGameLayer) {
                 GJBaseGameLayer::update(dt);
             if (m.testResolved) {
                 m.testResolved = false;
-                advanceAnalysis(m.lastSurvived);
+                onTestResolved();
             }
         } else {
             GJBaseGameLayer::update(dt);
@@ -342,13 +398,13 @@ class $modify(MacroPlayLayer, PlayLayer) {
             m.finishedNotified = false;
             m.maxDrift = 0.f;
             m.maxDriftStep = -1;
-            m.desyncSteps = 0;
             if (m.haveSeed) { m_randomSeed = m.seed1; m_replayRandSeed = m.seed2; }
         } else if (m.mode == Mode::Analyzing) {
             m.playIndex = 0;
             m.step = 0;
             m.gameTime = 0;
             m.died = false;
+            m.deathStep = -1;
             if (m.haveSeed) { m_randomSeed = m.seed1; m_replayRandSeed = m.seed2; }
         }
     }
@@ -385,16 +441,16 @@ class $modify(MacroPlayLayer, PlayLayer) {
 
     void destroyPlayer(PlayerObject* p, GameObject* o) {
         PlayLayer::destroyPlayer(p, o);
-        if (Macro::get().mode == Mode::Analyzing) Macro::get().died = true;
+        auto& m = Macro::get();
+        if (m.mode == Mode::Analyzing) { m.died = true; m.deathStep = m.step; }
     }
 
     void levelComplete() {
         auto& m = Macro::get();
         if (m.mode == Mode::Analyzing) {
-            // count as "survived"; don't actually end the level mid-analysis
             m.testResolved = true;
             m.lastSurvived = true;
-            return;
+            return; // don't actually end the level mid-analysis
         }
         PlayLayer::levelComplete();
     }
