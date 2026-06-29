@@ -63,7 +63,6 @@ struct Macro {
     bool died = false, testResolved = false, lastSurvived = false;
     int deathStep = -1;
     int c240 = 0, c120 = 0, c60 = 0;
-    CCLabelBMFont* hud = nullptr;
 
     static Macro& get() { static Macro m; return m; }
 
@@ -113,14 +112,20 @@ void updateHud() {
     auto& m = Macro::get();
     auto pl = PlayLayer::get();
     if (!pl) return;
-    if (!m.hud || !m.hud->getParent()) {
-        m.hud = CCLabelBMFont::create("", "bigFont.fnt");
-        m.hud->setAnchorPoint({ 1.f, 1.f });
+    // Look the label up by tag on the CURRENT PlayLayer each time -- never hold
+    // a raw pointer across levels (the layer frees its children on exit).
+    constexpr int kHudTag = 0x4D504650; // 'MPFP'
+    auto hud = static_cast<CCLabelBMFont*>(pl->getChildByTag(kHudTag));
+    if (!hud) {
+        hud = CCLabelBMFont::create(" ", "bigFont.fnt");
+        if (!hud) return;
+        hud->setTag(kHudTag);
+        hud->setAnchorPoint({ 1.f, 1.f });
         auto win = CCDirector::sharedDirector()->getWinSize();
-        m.hud->setPosition(win.width - 6.f, win.height - 6.f);
-        m.hud->setScale(0.45f);
-        m.hud->setZOrder(10000);
-        pl->addChild(m.hud);
+        hud->setPosition(win.width - 6.f, win.height - 6.f);
+        hud->setScale(0.45f);
+        hud->setZOrder(10000);
+        pl->addChild(hud);
     }
     bool s240 = Mod::get()->getSettingValue<bool>("show-240");
     bool s120 = Mod::get()->getSettingValue<bool>("show-120");
@@ -130,7 +135,7 @@ void updateHud() {
     if (s240) s += fmt::format("FP@240: {}\n", m.c240);
     if (s120) s += fmt::format("FP@120: {}\n", m.c120);
     if (s60)  s += fmt::format("FP@60: {}",   m.c60);
-    m.hud->setString(s.c_str());
+    hud->setString(s.c_str());
 }
 
 // ---- recording / playback --------------------------------------------------
