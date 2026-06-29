@@ -112,14 +112,14 @@ class $modify(MacroBGL, GJBaseGameLayer) {
         GJBaseGameLayer::handleButton(down, button, isPlayer1);
     }
 
-    void processCommands(float dt, bool isHalfTick, bool isLastTick) {
+    // GD applies queued inputs here, once per physics step. Injecting at this
+    // exact point (like Eclipse's bot) makes the replayed jump land at the same
+    // physics moment GD applied it during recording.
+    void processQueuedButtons(float dt, bool clearQueue) {
         auto& m = Macro::get();
         if (m.mode == Mode::Playing) {
             while (m.playIndex < m.inputs.size() && m.inputs[m.playIndex].step <= m.step) {
                 auto const& in = m.inputs[m.playIndex];
-                // Inject at the PLAYER level (pushButton/releaseButton) -- the
-                // low-level "make the player jump" call. handleButton() did not
-                // actually move the player when called from here.
                 PlayerObject* p = in.player1 ? m_player1 : m_player2;
                 if (p) {
                     auto btn = static_cast<PlayerButton>(in.button);
@@ -140,6 +140,11 @@ class $modify(MacroBGL, GJBaseGameLayer) {
                 notify(fmt::format("Macro: injected {} inputs", m.injected), NotificationIcon::Info);
             }
         }
+        GJBaseGameLayer::processQueuedButtons(dt, clearQueue);
+    }
+
+    void processCommands(float dt, bool isHalfTick, bool isLastTick) {
+        auto& m = Macro::get();
         GJBaseGameLayer::processCommands(dt, isHalfTick, isLastTick);
         if (m.mode != Mode::Idle) m.step++; // advance after the step
     }
