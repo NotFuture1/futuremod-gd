@@ -36,6 +36,35 @@
             "type": "keybind",
             "category": "gameplay",
             "default": "K"
+        },
+        "macro-analyze": {
+            "name": "Macro: Analyze frame perfects",
+            "description": "Run the frame-perfect analyzer on the recorded macro. It shifts each jump +/- a few ticks, re-runs (fast-forwarded), and measures each input's timing window. Turn OFF noclip and speedhack before running.",
+            "type": "keybind",
+            "category": "gameplay",
+            "default": "N"
+        },
+        "analyze-display-title": {
+            "name": "Frame-perfect display rates",
+            "type": "title"
+        },
+        "show-240": {
+            "name": "Show 240 FPS",
+            "description": "Display the frame-perfect count at 240 (window <= 1 tick).",
+            "type": "bool",
+            "default": true
+        },
+        "show-120": {
+            "name": "Show 120 FPS",
+            "description": "Display the frame-perfect count at 120 (window <= 2 ticks).",
+            "type": "bool",
+            "default": false
+        },
+        "show-60": {
+            "name": "Show 60 FPS",
+            "description": "Display the frame-perfect count at 60 (window <= 4 ticks).",
+            "type": "bool",
+            "default": false
         }
     }
 }
