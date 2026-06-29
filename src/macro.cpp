@@ -60,6 +60,7 @@ struct Macro {
     size_t targetIdx = 0;
     int offset = 0, dir = 0, minSurv = 0, maxSurv = 0;
     int marginEnd = 0, testCount = 0, lastTargetStep = 0;
+    int testFrames = 0; // real frames spent on the current test (hang guard)
     bool baseline = false;
     bool died = false, testResolved = false, lastSurvived = false;
     int deathStep = -1;
@@ -232,6 +233,7 @@ void beginTest() {
     m.testResolved = false;
     m.died = false;
     m.deathStep = -1;
+    m.testFrames = 0;
     m.marginEnd = m.baseline
         ? (m.lastTargetStep + kMargin)
         : (m.inputs[m.targets[m.targetIdx]].step + kMargin);
@@ -366,8 +368,12 @@ class $modify(MacroBGL, GJBaseGameLayer) {
             if (m.mode == Mode::Playing && !m.finishedNotified
                 && m.playIndex >= m.inputs.size() && !m.inputs.empty()) {
                 m.finishedNotified = true;
-                notify(fmt::format("Macro done. Max drift {:.1f}u @ step {}",
-                    m.maxDrift, m.maxDriftStep), NotificationIcon::Info);
+                // the drift track only exists for a macro recorded this session
+                if (m.track.empty())
+                    notify("Macro playback finished", NotificationIcon::Info);
+                else
+                    notify(fmt::format("Macro done. Max drift {:.1f}u @ step {}",
+                        m.maxDrift, m.maxDriftStep), NotificationIcon::Info);
             }
         }
         GJBaseGameLayer::processQueuedButtons(dt, clearQueue);
@@ -423,6 +429,13 @@ class $modify(MacroBGL, GJBaseGameLayer) {
         if (m.mode == Mode::Analyzing) {
             for (int i = 0; i < kFF && !m.testResolved; i++)
                 GJBaseGameLayer::update(dt);
+            // hang guard: a test that never resolves (stuck/desync) is treated
+            // as "survived" so it can't fabricate a frame-perfect, then we move on.
+            if (!m.testResolved && ++m.testFrames > 2400) {
+                log::warn("[fp] test timeout (target {}, offset {})", m.targetIdx, m.offset);
+                m.testResolved = true;
+                m.lastSurvived = true;
+            }
             if (m.testResolved) {
                 m.testResolved = false;
                 onTestResolved();
