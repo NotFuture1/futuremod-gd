@@ -3,6 +3,7 @@
 #include <Geode/modify/PlayLayer.hpp>
 #include <Geode/loader/SettingV3.hpp>
 #include <unordered_map>
+#include <cmath>
 
 using namespace geode::prelude;
 
@@ -35,7 +36,9 @@ struct Macro {
     Mode mode = Mode::Idle;
     std::vector<InputEdge> inputs;
     size_t playIndex = 0;
-    int step = 0;          // current physics step from level start
+    int step = 0;          // current step = round(gameTime * 240), speed-invariant
+    double gameTime = 0;   // accumulated game-time (seconds) from level start
+    int dtLogBudget = 0;   // diagnostic: log a few dt values while recording
     int injected = 0;      // diagnostic: inputs injected this playback
     bool finishedNotified = false;
     int logBudget = 0;     // diagnostic: limit verbose per-step logging
@@ -56,6 +59,8 @@ void startRecording() {
     m.inputs.clear();
     m.cpStep.clear();
     m.step = 0;
+    m.gameTime = 0;
+    m.dtLogBudget = 8;
     pl->resetLevel(); // start the attempt fresh from the top
     log::info("[macro] recording started");
     notify("Macro: recording (practice-aware)", NotificationIcon::Info);
@@ -83,8 +88,9 @@ void startPlaying() {
     m.playIndex = 0;
     m.injected = 0;
     m.step = 0;
+    m.gameTime = 0;
     m.finishedNotified = false;
-    m.logBudget = 45; // log the first ~24 physics steps' cadence
+    m.logBudget = 45;
     pl->resetLevel(); // restart from the top
     log::info("[macro] playback started: {} inputs queued, first step={}, last step={}",
         m.inputs.size(), m.inputs.front().step, m.inputs.back().step);
@@ -145,8 +151,18 @@ class $modify(MacroBGL, GJBaseGameLayer) {
 
     void processCommands(float dt, bool isHalfTick, bool isLastTick) {
         auto& m = Macro::get();
+        if (m.mode != Mode::Idle) {
+            // Index by GAME-TIME, not frame count, so recording while slowed
+            // down (smaller dt per step) maps to the same step on normal-speed
+            // playback. dt is the game-time this step advances (1/240 at 1x).
+            m.gameTime += dt;
+            m.step = static_cast<int>(std::llround(m.gameTime * 240.0));
+            if (m.mode == Mode::Recording && m.dtLogBudget > 0) {
+                log::info("[macro] rec dt={} gameTime={} step={}", dt, m.gameTime, m.step);
+                m.dtLogBudget--;
+            }
+        }
         GJBaseGameLayer::processCommands(dt, isHalfTick, isLastTick);
-        if (m.mode != Mode::Idle) m.step++; // advance after the step
     }
 };
 
@@ -164,6 +180,7 @@ class $modify(MacroPlayLayer, PlayLayer) {
                 m.inputs.clear();
                 m.cpStep.clear();
                 m.step = 0;
+                m.gameTime = 0;
             }
             // else: practice respawn -> handled in loadFromCheckpoint
         } else if (m.mode == Mode::Playing) {
@@ -172,6 +189,7 @@ class $modify(MacroPlayLayer, PlayLayer) {
             m.playIndex = 0;
             m.injected = 0;
             m.step = 0;
+            m.gameTime = 0;
             m.finishedNotified = false;
             m.logBudget = 45;
         }
@@ -194,6 +212,7 @@ class $modify(MacroPlayLayer, PlayLayer) {
             auto it = m.cpStep.find(cp);
             if (it != m.cpStep.end()) {
                 m.step = it->second;
+                m.gameTime = m.step / 240.0; // keep game-time in sync with the rewind
                 // drop the failed attempt's inputs recorded after this checkpoint
                 while (!m.inputs.empty() && m.inputs.back().step >= m.step) {
                     m.inputs.pop_back();
