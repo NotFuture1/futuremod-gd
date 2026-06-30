@@ -31,7 +31,6 @@ constexpr int kFF     = 1;   // 1 = no fast-forward (FF corrupts physics -> fals
 constexpr int kCap    = 8000;
 constexpr int kStall  = 24;   // steps with no forward progress => the player is dead
 constexpr float kBack = 8.f;  // x dropping this far => respawned (also a death)
-constexpr int kPre    = kMaxK + 4; // ticks before a jump to snapshot (room to shift early)
 
 enum class Mode { Idle, Recording, Playing, Analyzing };
 
@@ -99,13 +98,6 @@ struct Macro {
     // which can fire without actually killing on some levels/setups).
     float maxX = -1.f;        // furthest x reached this test
     int lastProgressStep = 0; // step at which maxX last increased
-    // --- save-state acceleration: snapshot just before each jump so per-jump tests
-    //     simulate ~30 ticks instead of replaying the whole level from the start ---
-    std::vector<CheckpointObject*> jumpCps; // one snapshot per target jump (retained)
-    std::vector<int> jumpCpStep;            // game-step each snapshot was taken at
-    size_t nextCpIdx = 0;                   // next snapshot to capture during baseline
-    bool useCheckpoints = false;
-    bool wasPractice = false;               // restore the user's practice toggle after
     int c240 = 0, c120 = 0, c60 = 0;
 
     // analysis results that persist for the live playback tally
@@ -276,14 +268,6 @@ void stopPlaying() {
 
 // ---- analyzer --------------------------------------------------------------
 
-void clearJumpCps() {
-    auto& m = Macro::get();
-    for (auto cp : m.jumpCps) if (cp) cp->release();
-    m.jumpCps.clear();
-    m.jumpCpStep.clear();
-    m.nextCpIdx = 0;
-}
-
 void beginTest() {
     auto& m = Macro::get();
     m.testResolved = false;
@@ -293,30 +277,9 @@ void beginTest() {
     m.marginEnd = m.baseline
         ? (m.lastTargetStep + kMargin)
         : (m.inputs[m.targets[m.targetIdx]].step + kMargin);
-    auto pl = PlayLayer::get();
-    bool fast = !m.baseline && m.useCheckpoints
-        && m.targetIdx < m.jumpCps.size() && m.jumpCps[m.targetIdx];
-    if (fast && pl) {
-        // FAST PATH: restore the snapshot taken just before this jump and replay
-        // only the short window around it (the "illusion"), not the whole level.
-        pl->loadFromCheckpoint(m.jumpCps[m.targetIdx]);
-        m.step = m.jumpCpStep[m.targetIdx];
-        m.gameTime = m.step / 240.0;
-        m.playIndex = 0;
-        while (m.playIndex < m.inputs.size()
-            && static_cast<int>(m.inputs[m.playIndex].step) < m.step) m.playIndex++;
-        m.maxX = -1.f;
-        m.lastProgressStep = m.step;
-        if (m.targetIdx == 0) { // log the first jump's restores to verify resume
-            float px = pl->m_player1 ? pl->m_player1->getPosition().x : -1.f;
-            log::info("[fp] test jump#0 off {} loaded cp@step{} px={:.0f}",
-                m.offset, m.step, px);
-        }
-    } else {
-        if (pl) pl->resetLevel();      // baseline (or fallback): full run from start
-        m.maxX = -1.f;
-        m.lastProgressStep = 0;
-    }
+    if (auto pl = PlayLayer::get()) pl->resetLevel();
+    m.maxX = -1.f;          // fresh progress tracking for this test
+    m.lastProgressStep = 0;
 }
 
 void finishAnalysis() {
@@ -330,11 +293,6 @@ void finishAnalysis() {
     }
     log::info("[fp] DONE -> 240:{} 120:{} 60:{}", m.c240, m.c120, m.c60);
     m.save(); // persist windows so the live playback tally survives restarts
-    clearJumpCps();
-    if (auto pl = PlayLayer::get()) {
-        pl->removeAllCheckpoints();
-        if (!m.wasPractice) pl->togglePracticeMode(false);
-    }
     updateHud();
     playDing();
     notify(fmt::format("Analysis done. 240:{} 120:{} 60:{}", m.c240, m.c120, m.c60), NotificationIcon::Success);
@@ -384,11 +342,6 @@ void onTestResolved() {
         m.baseline = false;
         if (!m.lastSurvived) {
             m.mode = Mode::Idle;
-            clearJumpCps();
-            if (auto pl = PlayLayer::get()) {
-                pl->removeAllCheckpoints();
-                if (!m.wasPractice) pl->togglePracticeMode(false);
-            }
             log::warn("[fp] baseline stopped progressing @ step {} (maxX {:.0f})",
                 m.deathStep, m.maxX);
             std::string msg;
@@ -407,12 +360,8 @@ void onTestResolved() {
             return;
         }
         // baseline clean -> start probing the first target
-        size_t got = 0;
-        for (auto cp : m.jumpCps) if (cp) got++;
-        m.useCheckpoints = (got == m.jumpCps.size() && got > 0);
-        log::info("[fp] baseline OK (reached step {}, maxX {:.0f}) -> probing {} jumps, "
-            "save-states {}/{} ({})", m.step, m.maxX, m.targets.size(),
-            got, m.jumpCps.size(), m.useCheckpoints ? "FAST" : "from-start fallback");
+        log::info("[fp] baseline OK (reached step {}, maxX {:.0f}) -> probing {} jumps",
+            m.step, m.maxX, m.targets.size());
         m.targetIdx = 0; m.dir = -1; m.offset = -1; m.minSurv = 0; m.maxSurv = 0;
         beginTest();
         return;
@@ -433,21 +382,10 @@ void startAnalysis() {
     m.lastTargetStep = m.inputs[m.targets.back()].step;
     m.testCount = 0;
     m.c240 = m.c120 = m.c60 = 0;
-    // schedule a save-state kPre ticks before each jump; captured during the baseline.
-    clearJumpCps();
-    m.jumpCps.assign(m.targets.size(), nullptr);
-    m.jumpCpStep.assign(m.targets.size(), 0);
-    for (size_t i = 0; i < m.targets.size(); i++)
-        m.jumpCpStep[i] = std::max(0, static_cast<int>(m.inputs[m.targets[i]].step) - kPre);
-    m.useCheckpoints = false; // enabled after baseline confirms all snapshots captured
     // clear practice checkpoints so every test starts from the LEVEL START,
     // not from a mid-level checkpoint (which would put the run into a wall).
     int cps = pl->m_checkpointArray ? pl->m_checkpointArray->count() : 0;
     log::info("[fp] startAnalysis: {} inputs, {} checkpoints (clearing)", m.inputs.size(), cps);
-    // analysis runs in practice mode so loadFromCheckpoint cleanly respawns+resumes
-    // the player (outside practice it reloads into a dead/frozen state).
-    m.wasPractice = pl->m_isPracticeMode;
-    if (!m.wasPractice) pl->togglePracticeMode(true);
     pl->removeAllCheckpoints();
     m.baseline = true;       // first run is the unshifted determinism check
     m.mode = Mode::Analyzing;
@@ -545,19 +483,6 @@ class $modify(MacroBGL, GJBaseGameLayer) {
                 float tx = (m.step < static_cast<int>(m.track.size())) ? m.track[m.step].first : -1.f;
                 log::info("[fp] base step={} x={:.0f} trackx={:.0f}", m.step, pos.x, tx);
             }
-            // During the single baseline pass, snapshot the game state just before each
-            // jump so per-jump tests can resume from there instead of from the start.
-            if (m.baseline) {
-                while (m.nextCpIdx < m.jumpCpStep.size()
-                    && m.step >= m.jumpCpStep[m.nextCpIdx]) {
-                    if (auto pl = PlayLayer::get()) {
-                        auto cp = pl->markCheckpoint(); // real practice snapshot (full state)
-                        if (cp) cp->retain();
-                        m.jumpCps[m.nextCpIdx] = cp;
-                    }
-                    m.nextCpIdx++;
-                }
-            }
             // Death = the player stopped advancing. This ignores destroyPlayer entirely
             // (it can fire without killing), so a player that keeps moving is "alive".
             float cx = m_player1 ? m_player1->getPosition().x : m.maxX;
@@ -614,14 +539,6 @@ class $modify(MacroPlayLayer, PlayLayer) {
         // auto-load this level's saved macro (clears if none)
         Macro::get().loadForLevel(levelKeyFor(level));
         return true;
-    }
-
-    void onExit() {
-        // leaving the level: drop any analysis snapshots while their objects are
-        // still alive, and stop analyzing so we never load a stale checkpoint.
-        auto& m = Macro::get();
-        if (m.mode == Mode::Analyzing) { m.mode = Mode::Idle; clearJumpCps(); }
-        PlayLayer::onExit();
     }
 
     void resetLevel() {
