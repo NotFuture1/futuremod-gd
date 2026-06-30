@@ -365,6 +365,11 @@ void startAnalysis() {
     m.lastTargetStep = m.inputs[m.targets.back()].step;
     m.testCount = 0;
     m.c240 = m.c120 = m.c60 = 0;
+    // clear practice checkpoints so every test starts from the LEVEL START,
+    // not from a mid-level checkpoint (which would put the run into a wall).
+    int cps = pl->m_checkpointArray ? pl->m_checkpointArray->count() : 0;
+    log::info("[fp] startAnalysis: {} inputs, {} checkpoints (clearing)", m.inputs.size(), cps);
+    pl->removeAllCheckpoints();
     m.baseline = true;       // first run is the unshifted determinism check
     m.mode = Mode::Analyzing;
     updateHud();
@@ -446,6 +451,11 @@ class $modify(MacroBGL, GJBaseGameLayer) {
             while (m.pi60  < m.fp60.size()  && m.fp60[m.pi60]   <= m.step) { m.pi60++;  advanced = true; }
             if (advanced) { playDing(); updateHud(); }
         } else if (m.mode == Mode::Analyzing && !m.testResolved) {
+            if (m.baseline && m.step >= 1 && m.step <= 6 && m_player1) {
+                auto pos = m_player1->getPosition();
+                float tx = (m.step < static_cast<int>(m.track.size())) ? m.track[m.step].first : -1.f;
+                log::info("[fp] base step={} x={:.0f} trackx={:.0f}", m.step, pos.x, tx);
+            }
             if (m.died) {
                 m.testResolved = true;
                 if (m.baseline) {
@@ -561,7 +571,13 @@ class $modify(MacroPlayLayer, PlayLayer) {
     void destroyPlayer(PlayerObject* p, GameObject* o) {
         PlayLayer::destroyPlayer(p, o);
         auto& m = Macro::get();
-        if (m.mode == Mode::Analyzing) { m.died = true; m.deathStep = m.step; }
+        if (m.mode == Mode::Analyzing) {
+            m.died = true;
+            m.deathStep = m.step;
+            auto pos = m_player1 ? m_player1->getPosition() : cocos2d::CCPoint{ 0, 0 };
+            log::info("[fp] death @ step {} pos=({:.0f},{:.0f}) objNull={} baseline={}",
+                m.step, pos.x, pos.y, o == nullptr, m.baseline);
+        }
     }
 
     void levelComplete() {
