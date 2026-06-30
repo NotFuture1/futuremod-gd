@@ -504,12 +504,18 @@ class $modify(MacroBGL, GJBaseGameLayer) {
                 float drift = std::sqrt(dx * dx + dy * dy);
                 if (drift > m.maxDrift) { m.maxDrift = drift; m.maxDriftStep = m.step; }
             }
-            // live frame-perfect tally: count + ding as we pass each FP jump
-            bool advanced = false;
-            while (m.pi240 < m.fp240.size() && m.fp240[m.pi240] <= m.step) { m.pi240++; advanced = true; }
-            while (m.pi120 < m.fp120.size() && m.fp120[m.pi120] <= m.step) { m.pi120++; advanced = true; }
-            while (m.pi60  < m.fp60.size()  && m.fp60[m.pi60]   <= m.step) { m.pi60++;  advanced = true; }
-            if (advanced) { playDing(); updateHud(); }
+            // live frame-perfect tally: count as we pass each FP click, ding only for
+            // the rates the user has selected to display.
+            bool a240 = false, a120 = false, a60 = false;
+            while (m.pi240 < m.fp240.size() && m.fp240[m.pi240] <= m.step) { m.pi240++; a240 = true; }
+            while (m.pi120 < m.fp120.size() && m.fp120[m.pi120] <= m.step) { m.pi120++; a120 = true; }
+            while (m.pi60  < m.fp60.size()  && m.fp60[m.pi60]   <= m.step) { m.pi60++;  a60  = true; }
+            bool s240 = Mod::get()->getSettingValue<bool>("show-240");
+            bool s120 = Mod::get()->getSettingValue<bool>("show-120");
+            bool s60  = Mod::get()->getSettingValue<bool>("show-60");
+            if (!s240 && !s120 && !s60) s240 = true; // mirror the HUD default
+            if ((s240 && a240) || (s120 && a120) || (s60 && a60)) playDing();
+            if (a240 || a120 || a60) updateHud();
         } else if (m.mode == Mode::Analyzing && !m.testResolved) {
             if (m.baseline && m.step >= 1 && m.step <= 6 && m_player1) {
                 auto pos = m_player1->getPosition();
