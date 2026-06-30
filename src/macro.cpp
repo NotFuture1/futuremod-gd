@@ -105,6 +105,7 @@ struct Macro {
     std::vector<int> jumpCpStep;            // game-step each snapshot was taken at
     size_t nextCpIdx = 0;                   // next snapshot to capture during baseline
     bool useCheckpoints = false;
+    bool wasPractice = false;               // restore the user's practice toggle after
     int c240 = 0, c120 = 0, c60 = 0;
 
     // analysis results that persist for the live playback tally
@@ -306,6 +307,11 @@ void beginTest() {
             && static_cast<int>(m.inputs[m.playIndex].step) < m.step) m.playIndex++;
         m.maxX = -1.f;
         m.lastProgressStep = m.step;
+        if (m.targetIdx == 0) { // log the first jump's restores to verify resume
+            float px = pl->m_player1 ? pl->m_player1->getPosition().x : -1.f;
+            log::info("[fp] test jump#0 off {} loaded cp@step{} px={:.0f}",
+                m.offset, m.step, px);
+        }
     } else {
         if (pl) pl->resetLevel();      // baseline (or fallback): full run from start
         m.maxX = -1.f;
@@ -325,6 +331,10 @@ void finishAnalysis() {
     log::info("[fp] DONE -> 240:{} 120:{} 60:{}", m.c240, m.c120, m.c60);
     m.save(); // persist windows so the live playback tally survives restarts
     clearJumpCps();
+    if (auto pl = PlayLayer::get()) {
+        pl->removeAllCheckpoints();
+        if (!m.wasPractice) pl->togglePracticeMode(false);
+    }
     updateHud();
     playDing();
     notify(fmt::format("Analysis done. 240:{} 120:{} 60:{}", m.c240, m.c120, m.c60), NotificationIcon::Success);
@@ -375,6 +385,10 @@ void onTestResolved() {
         if (!m.lastSurvived) {
             m.mode = Mode::Idle;
             clearJumpCps();
+            if (auto pl = PlayLayer::get()) {
+                pl->removeAllCheckpoints();
+                if (!m.wasPractice) pl->togglePracticeMode(false);
+            }
             log::warn("[fp] baseline stopped progressing @ step {} (maxX {:.0f})",
                 m.deathStep, m.maxX);
             std::string msg;
@@ -430,6 +444,10 @@ void startAnalysis() {
     // not from a mid-level checkpoint (which would put the run into a wall).
     int cps = pl->m_checkpointArray ? pl->m_checkpointArray->count() : 0;
     log::info("[fp] startAnalysis: {} inputs, {} checkpoints (clearing)", m.inputs.size(), cps);
+    // analysis runs in practice mode so loadFromCheckpoint cleanly respawns+resumes
+    // the player (outside practice it reloads into a dead/frozen state).
+    m.wasPractice = pl->m_isPracticeMode;
+    if (!m.wasPractice) pl->togglePracticeMode(true);
     pl->removeAllCheckpoints();
     m.baseline = true;       // first run is the unshifted determinism check
     m.mode = Mode::Analyzing;
@@ -533,7 +551,7 @@ class $modify(MacroBGL, GJBaseGameLayer) {
                 while (m.nextCpIdx < m.jumpCpStep.size()
                     && m.step >= m.jumpCpStep[m.nextCpIdx]) {
                     if (auto pl = PlayLayer::get()) {
-                        auto cp = pl->createCheckpoint();
+                        auto cp = pl->markCheckpoint(); // real practice snapshot (full state)
                         if (cp) cp->retain();
                         m.jumpCps[m.nextCpIdx] = cp;
                     }
