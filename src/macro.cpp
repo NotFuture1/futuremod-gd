@@ -92,6 +92,9 @@ struct Macro {
     bool baseline = false;
     bool died = false, testResolved = false, lastSurvived = false;
     int deathStep = -1;
+    int deathStreak = 0;   // consecutive destroyPlayer with no reset -> noclip/safe-mode
+    int resetCount = 0;    // death-respawns within one baseline -> genuine start desync
+    bool noclipDetected = false;
     int c240 = 0, c120 = 0, c60 = 0;
 
     // analysis results that persist for the live playback tally
@@ -268,10 +271,13 @@ void beginTest() {
     m.died = false;
     m.deathStep = -1;
     m.testFrames = 0;
+    m.deathStreak = 0;
+    m.noclipDetected = false;
     m.marginEnd = m.baseline
         ? (m.lastTargetStep + kMargin)
         : (m.inputs[m.targets[m.targetIdx]].step + kMargin);
     if (auto pl = PlayLayer::get()) pl->resetLevel();
+    m.resetCount = 0; // don't count this intentional reset; only death-respawns matter
 }
 
 void finishAnalysis() {
@@ -334,13 +340,20 @@ void onTestResolved() {
         m.baseline = false;
         if (!m.lastSurvived) {
             m.mode = Mode::Idle;
-            log::warn("[fp] baseline desynced @ step {}", m.deathStep);
-            std::string msg = (m.deathStep <= 10)
-                ? fmt::format("Can't analyze: the replay can't get past the start (step {}).\n"
-                              "Check Mega Hack -> Noclip & Safe Mode OFF, then record a fresh\n"
-                              "run from the level start (not a StartPos).", m.deathStep)
-                : fmt::format("Can't analyze: replay drifted off at step {}.\n"
-                              "Turn OFF speedhack / CBF, then record a fresh clean run.", m.deathStep);
+            std::string msg;
+            if (m.noclipDetected) {
+                log::warn("[fp] baseline: deaths suppressed (noclip/safe mode) @ step {}", m.deathStep);
+                msg = "Can't analyze: Noclip / Safe Mode / No Death is ON.\n"
+                      "Your player flew THROUGH a hazard instead of dying, so there are\n"
+                      "no real deaths to measure. Turn OFF every death-blocker in Mega Hack\n"
+                      "(Noclip, Safe Mode, No Death, Auto-Retry), then record a real clear.";
+            } else {
+                log::warn("[fp] baseline desynced @ step {}", m.deathStep);
+                msg = fmt::format("Can't analyze: the replay dies at the start (step {}) and\n"
+                                  "can't get past it -- this macro isn't a clean clear.\n"
+                                  "Record a run that legitimately beats the level, then analyze.",
+                                  m.deathStep);
+            }
             notify(msg, NotificationIcon::Error);
             return;
         }
@@ -460,16 +473,25 @@ class $modify(MacroBGL, GJBaseGameLayer) {
                 float tx = (m.step < static_cast<int>(m.track.size())) ? m.track[m.step].first : -1.f;
                 log::info("[fp] base step={} x={:.0f} trackx={:.0f}", m.step, pos.x, tx);
             }
-            if (m.died) {
-                m.testResolved = true;
-                if (m.baseline) {
-                    m.lastSurvived = false; // baseline must not die
-                } else {
-                    // a death only counts against this jump if we actually reached it;
-                    // an earlier death is upstream desync, not the shift's doing.
-                    int tstep = m.inputs[m.targets[m.targetIdx]].step;
-                    m.lastSurvived = (m.deathStep < tstep);
+            if (m.baseline) {
+                if (m.deathStreak >= 4) {
+                    // destroyPlayer fired on several consecutive steps without a respawn:
+                    // the player is passing THROUGH a hazard -> noclip / safe mode / no death.
+                    m.testResolved = true; m.lastSurvived = false; m.noclipDetected = true;
+                } else if (m.resetCount >= 3) {
+                    // keeps dying and respawning at the same spot -> not a clean clear.
+                    m.testResolved = true; m.lastSurvived = false;
+                } else if (m.step >= m.marginEnd) {
+                    // reached the end without dying -> baseline is clean, start probing.
+                    m.testResolved = true; m.lastSurvived = true;
                 }
+                // else: a lone death just respawned us; keep going to see which case it is.
+            } else if (m.died) {
+                m.testResolved = true;
+                // a death only counts against this jump if we actually reached it;
+                // an earlier death is upstream desync, not the shift's doing.
+                int tstep = m.inputs[m.targets[m.targetIdx]].step;
+                m.lastSurvived = (m.deathStep < tstep);
             } else if (m.step >= m.marginEnd) {
                 m.testResolved = true;
                 m.lastSurvived = true;
@@ -487,7 +509,7 @@ class $modify(MacroBGL, GJBaseGameLayer) {
             if (!m.testResolved && ++m.testFrames > 2400) {
                 log::warn("[fp] test timeout (target {}, offset {})", m.targetIdx, m.offset);
                 m.testResolved = true;
-                m.lastSurvived = true;
+                m.lastSurvived = !m.baseline; // baseline that never settles = desync, not a pass
             }
             if (m.testResolved) {
                 m.testResolved = false;
@@ -538,6 +560,8 @@ class $modify(MacroPlayLayer, PlayLayer) {
             m.gameTime = 0;
             m.died = false;
             m.deathStep = -1;
+            m.deathStreak = 0;   // a real reset breaks the consecutive-death streak
+            m.resetCount++;      // ...and counts as one death-respawn this baseline
             if (m.haveSeed) { m_randomSeed = m.seed1; m_replayRandSeed = m.seed2; }
         }
     }
@@ -587,6 +611,7 @@ class $modify(MacroPlayLayer, PlayLayer) {
         if (m.mode == Mode::Analyzing) {
             m.died = true;
             m.deathStep = m.step;
+            m.deathStreak++; // resetLevel zeroes this; so it only grows if no real reset happens
         }
     }
 
