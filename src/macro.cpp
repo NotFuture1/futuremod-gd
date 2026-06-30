@@ -1,12 +1,15 @@
 #include <Geode/Geode.hpp>
 #include <Geode/modify/GJBaseGameLayer.hpp>
 #include <Geode/modify/PlayLayer.hpp>
+#include <Geode/modify/PauseLayer.hpp>
 #include <Geode/loader/SettingV3.hpp>
+#include <Geode/ui/Popup.hpp>
 #include <unordered_map>
 #include <vector>
 #include <string>
 #include <sstream>
 #include <algorithm>
+#include <cctype>
 #include <cmath>
 
 using namespace geode::prelude;
@@ -35,6 +38,31 @@ struct InputEdge {
     bool player1;
     bool down;
 };
+
+// Per-level macro files: macros/<key>.txt under the mod save dir.
+std::string sanitizeKey(std::string const& s) {
+    std::string o;
+    for (char c : s) o += (std::isalnum(static_cast<unsigned char>(c)) ? c : '_');
+    return o.empty() ? std::string("level") : o;
+}
+
+std::string levelKeyFor(GJGameLevel* lvl) {
+    if (!lvl) return "unknown";
+    int id = lvl->m_levelID.value();
+    if (id > 0) return std::to_string(id);                  // online levels
+    return "local_" + sanitizeKey(std::string(lvl->m_levelName)); // local levels
+}
+
+std::filesystem::path macrosDir() {
+    auto d = Mod::get()->getSaveDir() / "macros";
+    std::error_code ec;
+    std::filesystem::create_directories(d, ec);
+    return d;
+}
+
+std::filesystem::path pathForKey(std::string const& key) {
+    return macrosDir() / (key + ".txt");
+}
 
 struct Macro {
     Mode mode = Mode::Idle;
@@ -72,9 +100,11 @@ struct Macro {
     std::vector<int> fp240, fp120, fp60;
     size_t pi240 = 0, pi120 = 0, pi60 = 0;
 
+    std::string curKey; // current level's key (set on PlayLayer::init)
+
     static Macro& get() { static Macro m; return m; }
 
-    std::filesystem::path path() { return Mod::get()->getSaveDir() / "macro.txt"; }
+    std::filesystem::path path() { return pathForKey(curKey); }
 
     void buildFpLists() {
         fp240.clear(); fp120.clear(); fp60.clear();
@@ -102,14 +132,18 @@ struct Macro {
         if (!res) log::warn("[macro] save failed: {}", res.unwrapErr());
     }
 
-    void load() {
-        auto res = file::readString(path());
-        if (!res) return;
+    // Load the macro saved for a given level key (clears in-memory macro if none).
+    void loadForLevel(std::string const& key) {
+        curKey = key;
+        inputs.clear();
+        savedWindows.clear();
+        haveSeed = false;
+        seed1 = seed2 = 0;
+        auto res = file::readString(pathForKey(key));
+        if (!res) { log::info("[macro] no macro for level '{}'", key); return; }
         std::istringstream ss(res.unwrap());
         std::string line;
         if (!std::getline(ss, line) || line.rfind("FUTUREMOD_MACRO", 0) != 0) return;
-        inputs.clear();
-        savedWindows.clear();
         if (std::getline(ss, line)) {
             std::istringstream s2(line);
             s2 >> seed1 >> seed2;
@@ -128,7 +162,7 @@ struct Macro {
                     inputs.push_back({ step, btn, (bool)p1, (bool)dn });
             }
         }
-        log::info("[macro] loaded {} inputs, {} analyzed windows", inputs.size(), savedWindows.size());
+        log::info("[macro] level '{}': loaded {} inputs, {} windows", key, inputs.size(), savedWindows.size());
     }
 };
 
@@ -448,6 +482,13 @@ class $modify(MacroBGL, GJBaseGameLayer) {
 
 // ---------------------------------------------------------------------------
 class $modify(MacroPlayLayer, PlayLayer) {
+    bool init(GJGameLevel* level, bool useReplay, bool dontCreateObjects) {
+        if (!PlayLayer::init(level, useReplay, dontCreateObjects)) return false;
+        // auto-load this level's saved macro (clears if none)
+        Macro::get().loadForLevel(levelKeyFor(level));
+        return true;
+    }
+
     void resetLevel() {
         PlayLayer::resetLevel();
         auto& m = Macro::get();
@@ -530,9 +571,63 @@ class $modify(MacroPlayLayer, PlayLayer) {
 };
 
 // ---------------------------------------------------------------------------
-$execute {
-    Macro::get().load();
+// In-level "Macros" menu (in the pause screen): load this level's saved macro.
+// ---------------------------------------------------------------------------
+class $modify(MacroPauseLayer, PauseLayer) {
+    void customSetup() {
+        PauseLayer::customSetup();
+        auto spr = ButtonSprite::create("Macros");
+        spr->setScale(0.6f);
+        auto btn = CCMenuItemSpriteExtra::create(spr, this, menu_selector(MacroPauseLayer::onMacros));
+        auto menu = CCMenu::create();
+        menu->addChild(btn);
+        auto win = CCDirector::sharedDirector()->getWinSize();
+        menu->setPosition(60.f, win.height - 22.f); // top-left corner of the pause screen
+        menu->setZOrder(100);
+        this->addChild(menu);
+    }
 
+    void onMacros(CCObject*) {
+        auto pl = PlayLayer::get();
+        if (!pl || !pl->m_level) {
+            createQuickPopup("Macros", "Not in a level.", "OK", nullptr, [](auto, bool) {});
+            return;
+        }
+        std::string key = levelKeyFor(pl->m_level);
+        auto res = file::readString(pathForKey(key));
+        if (!res) {
+            createQuickPopup("Macros",
+                "No macro saved for this level yet.\nRecord one with your <cy>Macro: Record</c> key.",
+                "OK", nullptr, [](auto, bool) {});
+            return;
+        }
+        // count inputs / analyzed jumps in the file
+        int nin = 0, nwin = 0;
+        {
+            std::istringstream ss(res.unwrap());
+            std::string l;
+            std::getline(ss, l); // header
+            std::getline(ss, l); // seeds
+            while (std::getline(ss, l)) {
+                if (l.empty()) continue;
+                if (l[0] == 'W') nwin++; else nin++;
+            }
+        }
+        createQuickPopup("Macros",
+            fmt::format("Saved macro for this level:\n<cy>{}</c> inputs, <cg>{}</c> analyzed jumps.\n\nLoad it?", nin, nwin),
+            "Cancel", "Load",
+            [key](FLAlertLayer*, bool load) {
+                if (!load) return;
+                Macro::get().loadForLevel(key);
+                Notification::create(
+                    fmt::format("Loaded macro: {} inputs", Macro::get().inputs.size()),
+                    NotificationIcon::Success)->show();
+            });
+    }
+};
+
+// ---------------------------------------------------------------------------
+$execute {
     listenForKeybindSettingPresses("macro-record", [](Keybind const&, bool down, bool repeat, double) -> bool {
         if (down && !repeat) {
             if (Macro::get().mode == Mode::Recording) stopRecording();
