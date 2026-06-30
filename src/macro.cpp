@@ -27,7 +27,7 @@ namespace {
 
 constexpr int kMargin = 48;
 constexpr int kMaxK   = 8;
-constexpr int kFF     = 6;
+constexpr int kFF     = 1;   // 1 = no fast-forward (FF corrupts physics -> false deaths)
 constexpr int kCap    = 8000;
 
 enum class Mode { Idle, Recording, Playing, Analyzing };
