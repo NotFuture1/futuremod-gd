@@ -573,14 +573,20 @@ class $modify(MacroPlayLayer, PlayLayer) {
     }
 
     void destroyPlayer(PlayerObject* p, GameObject* o) {
-        PlayLayer::destroyPlayer(p, o);
         auto& m = Macro::get();
+        if (m.mode == Mode::Playing || m.mode == Mode::Analyzing) {
+            auto pp = m_player1 ? m_player1->getPosition() : cocos2d::CCPoint{ 0, 0 };
+            auto op = o ? o->getPosition() : cocos2d::CCPoint{ -1, -1 };
+            log::info("[fp] destroyPlayer mode={} step={} ppos=({:.0f},{:.0f}) "
+                      "objPos=({:.0f},{:.0f}) isP1={} oType={}",
+                m.mode == Mode::Analyzing ? "ANALYZE" : "PLAY", m.step,
+                pp.x, pp.y, op.x, op.y, p == m_player1,
+                o ? static_cast<int>(o->m_objectType) : -1);
+        }
+        PlayLayer::destroyPlayer(p, o);
         if (m.mode == Mode::Analyzing) {
             m.died = true;
             m.deathStep = m.step;
-            auto pos = m_player1 ? m_player1->getPosition() : cocos2d::CCPoint{ 0, 0 };
-            log::info("[fp] death @ step {} pos=({:.0f},{:.0f}) objNull={} baseline={}",
-                m.step, pos.x, pos.y, o == nullptr, m.baseline);
         }
     }
 
