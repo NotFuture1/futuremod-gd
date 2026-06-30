@@ -377,11 +377,16 @@ void onTestResolved() {
             clearJumpCps();
             log::warn("[fp] baseline stopped progressing @ step {} (maxX {:.0f})",
                 m.deathStep, m.maxX);
-            std::string msg = (m.deathStep <= 30)
-                ? fmt::format("Can't analyze: the replay stalls right at the start (step {}).\n"
+            std::string msg;
+            if (m.deathStep < 0)
+                msg = "Can't analyze: the replay didn't reach the end in time (timed out).\n"
+                      "If you're using speedhack, set the game speed to 1x for analysis.";
+            else if (m.deathStep <= 30)
+                msg = fmt::format("Can't analyze: the replay stalls right at the start (step {}).\n"
                               "The recorded run isn't replaying cleanly from the beginning.\n"
-                              "Try re-recording a fresh run, then analyze.", m.deathStep)
-                : fmt::format("Can't analyze: the replay drifts off at step {} and stops\n"
+                              "Try re-recording a fresh run, then analyze.", m.deathStep);
+            else
+                msg = fmt::format("Can't analyze: the replay drifts off at step {} and stops\n"
                               "progressing. The replay isn't reproducing your run exactly --\n"
                               "re-record a clean run and try again.", m.deathStep);
             notify(msg, NotificationIcon::Error);
@@ -538,7 +543,9 @@ class $modify(MacroBGL, GJBaseGameLayer) {
             // Death = the player stopped advancing. This ignores destroyPlayer entirely
             // (it can fire without killing), so a player that keeps moving is "alive".
             float cx = m_player1 ? m_player1->getPosition().x : m.maxX;
-            if (cx > m.maxX + 0.2f) { m.maxX = cx; m.lastProgressStep = m.step; }
+            // forward progress resets the hang-guard, so long levels never time out;
+            // the guard only trips when the run is genuinely stuck (no progress).
+            if (cx > m.maxX + 0.2f) { m.maxX = cx; m.lastProgressStep = m.step; m.testFrames = 0; }
             bool respawned = (cx < m.maxX - kBack);                  // x jumped backward
             bool frozen = (m.step - m.lastProgressStep) >= kStall;   // x stuck in place
             bool dead = respawned || frozen;
