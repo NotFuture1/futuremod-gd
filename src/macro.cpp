@@ -220,6 +220,9 @@ void updateHud() {
     hud->setString(s.c_str());
 }
 
+// master switch: when off, all macro features are fully disabled.
+bool macroEnabled() { return Mod::get()->getSettingValue<bool>("macro-enabled"); }
+
 // ---- recording / playback --------------------------------------------------
 
 void startRecording() {
@@ -537,7 +540,8 @@ class $modify(MacroPlayLayer, PlayLayer) {
     bool init(GJGameLevel* level, bool useReplay, bool dontCreateObjects) {
         if (!PlayLayer::init(level, useReplay, dontCreateObjects)) return false;
         // auto-load this level's saved macro (clears if none)
-        Macro::get().loadForLevel(levelKeyFor(level));
+        if (macroEnabled()) Macro::get().loadForLevel(levelKeyFor(level));
+        else Macro::get().mode = Mode::Idle;
         return true;
     }
 
@@ -631,6 +635,7 @@ class $modify(MacroPlayLayer, PlayLayer) {
 class $modify(MacroPauseLayer, PauseLayer) {
     void customSetup() {
         PauseLayer::customSetup();
+        if (!macroEnabled()) return; // master switch off: no in-level macro menu
         auto spr = ButtonSprite::create("Macros");
         spr->setScale(0.6f);
         auto btn = CCMenuItemSpriteExtra::create(spr, this, menu_selector(MacroPauseLayer::onMacros));
@@ -684,6 +689,7 @@ class $modify(MacroPauseLayer, PauseLayer) {
 // ---------------------------------------------------------------------------
 $execute {
     listenForKeybindSettingPresses("macro-record", [](Keybind const&, bool down, bool repeat, double) -> bool {
+        if (!macroEnabled()) return false;
         if (down && !repeat) {
             if (Macro::get().mode == Mode::Recording) stopRecording();
             else startRecording();
@@ -692,6 +698,7 @@ $execute {
         return false;
     });
     listenForKeybindSettingPresses("macro-play", [](Keybind const&, bool down, bool repeat, double) -> bool {
+        if (!macroEnabled()) return false;
         if (down && !repeat) {
             if (Macro::get().mode == Mode::Playing) stopPlaying();
             else startPlaying();
@@ -700,6 +707,7 @@ $execute {
         return false;
     });
     listenForKeybindSettingPresses("macro-analyze", [](Keybind const&, bool down, bool repeat, double) -> bool {
+        if (!macroEnabled()) return false;
         if (down && !repeat) {
             if (Macro::get().mode == Mode::Analyzing) { Macro::get().mode = Mode::Idle; notify("Analyze: cancelled", NotificationIcon::Info); }
             else startAnalysis();

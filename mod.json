@@ -23,6 +23,12 @@
             "name": "Macro (frame-perfect analyzer, Phase 0)",
             "type": "title"
         },
+        "macro-enabled": {
+            "name": "Enable Macro Features",
+            "description": "Master switch for everything macro-related (recording, playback, the frame-perfect analyzer, the in-level menu, and the HUD). Turn this OFF to fully disable all macro functionality; the 'Exit Level Ending' keybind is unaffected.",
+            "type": "bool",
+            "default": true
+        },
         "macro-record": {
             "name": "Macro: Record",
             "description": "Toggle recording your inputs as a step-indexed macro. Because it indexes by physics step (not time), recording while the game is slowed down by other mods still captures clicks correctly. Recording restarts on death, so it captures the attempt you actually complete.",
