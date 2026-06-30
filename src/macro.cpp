@@ -335,8 +335,13 @@ void onTestResolved() {
         if (!m.lastSurvived) {
             m.mode = Mode::Idle;
             log::warn("[fp] baseline desynced @ step {}", m.deathStep);
-            notify(fmt::format("Analyze aborted: replay desynced @ step {}. Turn OFF speedhack/noclip/CBF.", m.deathStep),
-                NotificationIcon::Error);
+            std::string msg = (m.deathStep <= 10)
+                ? fmt::format("Analyze aborted: replay dies instantly (@ step {}).\n"
+                              "The macro was likely recorded with NOCLIP/speedhack, or from a StartPos.\n"
+                              "Re-record a clean legit run (no hacks, from the level start).", m.deathStep)
+                : fmt::format("Analyze aborted: replay desynced @ step {}.\n"
+                              "Turn OFF speedhack / CBF and re-record a clean run.", m.deathStep);
+            notify(msg, NotificationIcon::Error);
             return;
         }
         // baseline clean -> start probing the first target
