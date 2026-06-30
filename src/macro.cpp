@@ -437,6 +437,10 @@ class $modify(MacroBGL, GJBaseGameLayer) {
                 m.track.resize(m.step + 1, { pos.x, pos.y });
             m.track[m.step] = { pos.x, pos.y };
         } else if (m.mode == Mode::Playing) {
+            if (m.step >= 1 && m.step <= 6 && m_player1) {
+                auto pos = m_player1->getPosition();
+                log::info("[fp] PLAY step={} x={:.0f} y={:.0f}", m.step, pos.x, pos.y);
+            }
             if (m_player1 && m.step >= 0 && m.step < static_cast<int>(m.track.size())) {
                 auto pos = m_player1->getPosition();
                 auto rec = m.track[m.step];
