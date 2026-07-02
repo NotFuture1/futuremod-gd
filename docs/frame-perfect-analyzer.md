@@ -1,5 +1,15 @@
 # Frame-Perfect Analyzer — Design & Research
 
+> **Status (2026-07, `src/macro.cpp`):** implemented — step-indexed
+> record/replay with RNG-seed lock, per-level save files, baseline
+> determinism gate, ±k perturbation probing with early exit (window > 4
+> ticks stops immediately), optional release analysis, and a scheduler
+> time-scale speed-up that is verified by a second sped-up baseline and
+> auto-falls back to 1x. Death detection is progress-based (`maxX` +
+> stall), NOT `destroyPlayer` (it can fire without killing). Not yet done:
+> `.gdr` import/export (§3), buffer classification (§6), save-state
+> acceleration (§4 — tried once, reverted; restores insta-killed the player).
+
 Goal: after a single piece of human input (a completed run / macro of a level),
 **automatically** determine how many "frame perfects" the run contains, and
 where they are — far faster than manually frame-stepping each input.

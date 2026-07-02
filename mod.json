@@ -9,7 +9,7 @@
     "id": "swift.futuremod",
     "name": "Future Mod",
     "developer": "swift",
-    "description": "Press a key while a level is finishing to instantly exit the level, skipping the end animation, delay, and completion screen.",
+    "description": "Skip level endings with a key, plus a per-level macro recorder with an automatic frame-perfect analyzer.",
     "tags": ["gameplay", "utility"],
     "settings": {
         "skip-end": {
@@ -45,10 +45,24 @@
         },
         "macro-analyze": {
             "name": "Macro: Analyze frame perfects",
-            "description": "Run the frame-perfect analyzer on the recorded macro. It shifts each jump +/- a few ticks, re-runs (fast-forwarded), and measures each input's timing window. Turn OFF noclip and speedhack before running.",
+            "description": "Run the frame-perfect analyzer on the recorded macro. It shifts each input +/- a few ticks, re-runs, and measures each input's timing window. Turn OFF noclip and speedhack before running.",
             "type": "keybind",
             "category": "gameplay",
             "default": "N"
+        },
+        "analyze-speed": {
+            "name": "Analyzer speed-up",
+            "description": "Game speed while analyzing. The analyzer first re-verifies your replay at this speed and automatically falls back to 1x if it doesn't stay deterministic. Set to 1 to always analyze in real time.",
+            "type": "int",
+            "default": 4,
+            "min": 1,
+            "max": 8
+        },
+        "analyze-releases": {
+            "name": "Analyze releases too",
+            "description": "Also measure the timing window of RELEASES (letting go), not just presses. Wave/ship straight-flying is mostly release timing. Roughly doubles the analysis time.",
+            "type": "bool",
+            "default": false
         },
         "analyze-display-title": {
             "name": "Frame-perfect display rates",

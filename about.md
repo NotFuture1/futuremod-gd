@@ -1,15 +1,30 @@
 # Future Mod
 
-Tired of waiting through the level-ending sequence — getting sucked into the
-wall, then a few seconds of nothing, then the **Level Complete** message?
+Two tools in one mod.
 
-**Future Mod** lets you press a key the moment you finish a level to skip the
-entire ending and jump straight to the completion screen.
+## Skip the level ending
 
-## Usage
+Tired of the suck-into-the-wall animation, the dead air, and the **Level
+Complete** panel? Press your **Exit Level Ending** key (default: **Space**)
+the moment a level starts finishing and you're instantly back where you came
+from. The completion still counts — best %, stars and orbs are saved.
 
-1. Finish a level.
-2. Press your **Skip Key** (default: **Enter**).
-3. The Level Complete screen appears instantly.
+The key only acts while a level is actually finishing, so it's safe to leave
+on your jump key.
 
-The key is configurable in the mod's settings (Geode → Future Mod → ⚙️).
+## Macro + frame-perfect analyzer
+
+- **Record** (default **J**): records your inputs as a physics-step macro.
+  Practice-mode aware — checkpoints stitch the macro from cleared segments.
+- **Play** (default **K**): replays the macro from the start of the attempt.
+- **Analyze** (default **N**): re-runs your macro shifting every input a few
+  ticks earlier/later to measure its real timing window, then counts the
+  frame perfects at **240 / 120 / 60** (choose which rates to show in
+  settings). Runs sped-up when it can prove the replay stays deterministic,
+  otherwise in real time.
+
+A HUD in the top-right shows the tally, and later playbacks ding as you pass
+each frame-perfect input. Macros save per level automatically — reload them
+from the **Macros** button on the pause menu.
+
+Turn off speedhack and noclip while analyzing.

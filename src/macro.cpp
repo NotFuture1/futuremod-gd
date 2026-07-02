@@ -88,11 +88,14 @@ struct Macro {
     std::vector<size_t> targets;
     std::vector<int> windowTicks;
     size_t targetIdx = 0;
-    int offset = 0, dir = 0, minSurv = 0, maxSurv = 0;
+    int offset = 0, minSurv = 0, maxSurv = 0;
+    bool negDead = false, posDead = false; // probe side closed by a death
+    float speed = 1.f;       // analysis game speed (1 = real time)
+    bool speedPhase = false; // re-verifying the baseline at `speed`
     int marginEnd = 0, testCount = 0, lastTargetStep = 0;
     int testFrames = 0; // real frames spent on the current test (hang guard)
     bool baseline = false;
-    bool died = false, testResolved = false, lastSurvived = false;
+    bool testResolved = false, lastSurvived = false;
     int deathStep = -1;
     // death = "player stopped advancing", measured from position (NOT destroyPlayer,
     // which can fire without actually killing on some levels/setups).
@@ -181,6 +184,15 @@ void playDing() {
         fae->playEffect("achievement_01.ogg");
 }
 
+// Analysis speed-up = plain scheduler time scale (the same mechanism as a
+// speedhack): the engine itself splits the bigger dt into 1/240 substeps, so
+// physics runs the exact same steps -- unlike calling update() extra times per
+// frame, which corrupted physics. Only used after the baseline re-verifies at
+// this speed; ALWAYS restore to 1 on every analyzer exit path.
+void setAnalyzeSpeed(float s) {
+    CCDirector::sharedDirector()->getScheduler()->setTimeScale(s);
+}
+
 void updateHud() {
     auto& m = Macro::get();
     auto pl = PlayLayer::get();
@@ -242,6 +254,11 @@ void startRecording() {
 void stopRecording() {
     auto& m = Macro::get();
     m.mode = Mode::Idle;
+    // an empty recording must not clobber a previously saved (analyzed) macro
+    if (m.inputs.empty()) {
+        notify("Macro: nothing recorded, keeping the saved macro", NotificationIcon::Info);
+        return;
+    }
     m.save();
     notify(fmt::format("Macro: recorded + saved {} inputs", m.inputs.size()), NotificationIcon::Success);
 }
@@ -274,7 +291,6 @@ void stopPlaying() {
 void beginTest() {
     auto& m = Macro::get();
     m.testResolved = false;
-    m.died = false;
     m.deathStep = -1;
     m.testFrames = 0;
     m.marginEnd = m.baseline
@@ -287,7 +303,7 @@ void beginTest() {
 
 void finishAnalysis() {
     auto& m = Macro::get();
-    m.mode = Mode::Idle;
+    setAnalyzeSpeed(1.f);
     m.savedWindows.clear();
     for (size_t i = 0; i < m.targets.size(); i++) {
         log::info("[fp] input #{} step {} window={} ticks",
@@ -296,7 +312,8 @@ void finishAnalysis() {
     }
     log::info("[fp] DONE -> 240:{} 120:{} 60:{}", m.c240, m.c120, m.c60);
     m.save(); // persist windows so the live playback tally survives restarts
-    updateHud();
+    updateHud(); // while still Analyzing, so the HUD shows the final counts
+    m.mode = Mode::Idle;
     playDing();
     notify(fmt::format("Analysis done. 240:{} 120:{} 60:{}", m.c240, m.c120, m.c60), NotificationIcon::Success);
 }
@@ -305,44 +322,66 @@ void advanceAnalysis(bool survived) {
     auto& m = Macro::get();
     if (++m.testCount > kCap) { log::warn("[fp] hit test cap"); finishAnalysis(); return; }
 
-    bool finalize = false;
-    if (m.dir < 0) {
-        if (survived) {
-            m.minSurv = m.offset;
-            m.offset -= 1;
-            if (m.offset < -kMaxK) { m.dir = 1; m.offset = 1; }
-        } else {
-            m.dir = 1; m.offset = 1;
-        }
+    if (m.offset < 0) {
+        if (survived) m.minSurv = m.offset; else m.negDead = true;
     } else {
-        if (survived) {
-            m.maxSurv = m.offset;
-            m.offset += 1;
-            if (m.offset > kMaxK) finalize = true;
-        } else {
-            finalize = true;
-        }
+        if (survived) m.maxSurv = m.offset; else m.posDead = true;
     }
 
-    if (finalize) {
-        int w = m.maxSurv - m.minSurv + 1;
+    int w = m.maxSurv - m.minSurv + 1;
+    bool negOpen = !m.negDead && -m.minSurv < kMaxK;
+    bool posOpen = !m.posDead && m.maxSurv < kMaxK;
+    // stop as soon as the window is wider than any displayed threshold: more
+    // than 4 ticks isn't frame-perfect at 240/120/60, exact width is wasted tests
+    if (w > 4 || (!negOpen && !posOpen)) {
         m.windowTicks[m.targetIdx] = w;
-        if (w <= 1) m.c240++;
+        if (w <= 1) { m.c240++; playDing(); }
         if (w <= 2) m.c120++;
         if (w <= 4) m.c60++;
-        if (w <= 1) playDing();
         updateHud();
         m.targetIdx++;
         if (m.targetIdx >= m.targets.size()) { finishAnalysis(); return; }
-        m.dir = -1; m.offset = -1; m.minSurv = 0; m.maxSurv = 0;
+        m.minSurv = m.maxSurv = 0;
+        m.negDead = m.posDead = false;
+        m.offset = -1;
+    } else {
+        // expand the narrower open side next: probes run -1, +1, -2, +2, ...
+        if (negOpen && (!posOpen || -m.minSurv <= m.maxSurv)) m.offset = m.minSurv - 1;
+        else m.offset = m.maxSurv + 1;
     }
+    beginTest();
+}
+
+void startProbing() {
+    auto& m = Macro::get();
+    log::info("[fp] probing {} inputs at {}x", m.targets.size(), m.speed);
+    m.targetIdx = 0;
+    m.minSurv = m.maxSurv = 0;
+    m.negDead = m.posDead = false;
+    m.offset = -1;
     beginTest();
 }
 
 void onTestResolved() {
     auto& m = Macro::get();
     if (m.baseline) {
-        m.baseline = false;
+        if (m.speedPhase) {
+            // second baseline, sped up: keep the speed-up only if the replay
+            // stayed deterministic at that speed; otherwise probe at 1x
+            m.speedPhase = false;
+            m.baseline = false;
+            if (!m.lastSurvived) {
+                log::warn("[fp] baseline desyncs at {}x -> analyzing at 1x", m.speed);
+                notify(fmt::format("{}x speed-up unstable, analyzing at 1x", (int)m.speed),
+                    NotificationIcon::Info);
+                m.speed = 1.f;
+                setAnalyzeSpeed(1.f);
+            } else {
+                log::info("[fp] baseline OK at {}x", m.speed);
+            }
+            startProbing();
+            return;
+        }
         if (!m.lastSurvived) {
             m.mode = Mode::Idle;
             log::warn("[fp] baseline stopped progressing @ step {} (maxX {:.0f})",
@@ -362,11 +401,16 @@ void onTestResolved() {
             notify(msg, NotificationIcon::Error);
             return;
         }
-        // baseline clean -> start probing the first target
-        log::info("[fp] baseline OK (reached step {}, maxX {:.0f}) -> probing {} jumps",
-            m.step, m.maxX, m.targets.size());
-        m.targetIdx = 0; m.dir = -1; m.offset = -1; m.minSurv = 0; m.maxSurv = 0;
-        beginTest();
+        log::info("[fp] baseline OK (reached step {}, maxX {:.0f})", m.step, m.maxX);
+        if (m.speed > 1.f) {
+            // 1x is deterministic; now prove it still is at the requested speed
+            m.speedPhase = true;
+            setAnalyzeSpeed(m.speed);
+            beginTest();
+            return;
+        }
+        m.baseline = false;
+        startProbing();
         return;
     }
     advanceAnalysis(m.lastSurvived);
@@ -377,14 +421,19 @@ void startAnalysis() {
     if (!pl) { notify("Analyze: enter a level first", NotificationIcon::Error); return; }
     auto& m = Macro::get();
     if (m.inputs.empty()) { notify("Analyze: record a run first", NotificationIcon::Error); return; }
+    bool alsoReleases = Mod::get()->getSettingValue<bool>("analyze-releases");
     m.targets.clear();
     for (size_t i = 0; i < m.inputs.size(); i++)
-        if (m.inputs[i].down) m.targets.push_back(i);
+        if (m.inputs[i].down || alsoReleases) m.targets.push_back(i);
     if (m.targets.empty()) { notify("Analyze: no press inputs", NotificationIcon::Error); return; }
     m.windowTicks.assign(m.targets.size(), 0);
     m.lastTargetStep = m.inputs[m.targets.back()].step;
     m.testCount = 0;
     m.c240 = m.c120 = m.c60 = 0;
+    m.speed = std::max(1.f, static_cast<float>(
+        Mod::get()->getSettingValue<int64_t>("analyze-speed")));
+    m.speedPhase = false;
+    setAnalyzeSpeed(1.f); // the first baseline always verifies at 1x
     // clear practice checkpoints so every test starts from the LEVEL START,
     // not from a mid-level checkpoint (which would put the run into a wall).
     int cps = pl->m_checkpointArray ? pl->m_checkpointArray->count() : 0;
@@ -393,7 +442,8 @@ void startAnalysis() {
     m.baseline = true;       // first run is the unshifted determinism check
     m.mode = Mode::Analyzing;
     updateHud();
-    notify(fmt::format("Analyzing {} jumps... TURN OFF speedhack/noclip", m.targets.size()), NotificationIcon::Info);
+    notify(fmt::format("Analyzing {} inputs at {}x... TURN OFF speedhack/noclip",
+        m.targets.size(), (int)m.speed), NotificationIcon::Info);
     beginTest(); // baseline run
 }
 
@@ -539,10 +589,22 @@ class $modify(MacroBGL, GJBaseGameLayer) {
 class $modify(MacroPlayLayer, PlayLayer) {
     bool init(GJGameLevel* level, bool useReplay, bool dontCreateObjects) {
         if (!PlayLayer::init(level, useReplay, dontCreateObjects)) return false;
+        auto& m = Macro::get();
+        // a fresh level never starts inside a macro op: a leaked Playing /
+        // Analyzing mode would silently block all input here (handleButton
+        // eats it) and auto-replay the wrong macro
+        if (m.mode == Mode::Analyzing) setAnalyzeSpeed(1.f);
+        m.mode = Mode::Idle;
         // auto-load this level's saved macro (clears if none)
-        if (macroEnabled()) Macro::get().loadForLevel(levelKeyFor(level));
-        else Macro::get().mode = Mode::Idle;
+        if (macroEnabled()) m.loadForLevel(levelKeyFor(level));
         return true;
+    }
+
+    void onQuit() {
+        auto& m = Macro::get();
+        if (m.mode == Mode::Analyzing) setAnalyzeSpeed(1.f);
+        m.mode = Mode::Idle;
+        PlayLayer::onQuit();
     }
 
     void resetLevel() {
@@ -573,7 +635,6 @@ class $modify(MacroPlayLayer, PlayLayer) {
             m.playIndex = 0;
             m.step = 0;
             m.gameTime = 0;
-            m.died = false;
             m.deathStep = -1;
             // NOTE: deliberately do NOT reset maxX here -- after a death-respawn the
             // replay restarts at x~0, which stays below maxX and reads as "no progress"
@@ -709,7 +770,11 @@ $execute {
     listenForKeybindSettingPresses("macro-analyze", [](Keybind const&, bool down, bool repeat, double) -> bool {
         if (!macroEnabled()) return false;
         if (down && !repeat) {
-            if (Macro::get().mode == Mode::Analyzing) { Macro::get().mode = Mode::Idle; notify("Analyze: cancelled", NotificationIcon::Info); }
+            if (Macro::get().mode == Mode::Analyzing) {
+                Macro::get().mode = Mode::Idle;
+                setAnalyzeSpeed(1.f);
+                notify("Analyze: cancelled", NotificationIcon::Info);
+            }
             else startAnalysis();
             return true;
         }
