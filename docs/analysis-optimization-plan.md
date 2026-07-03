@@ -1,10 +1,15 @@
 # Analyzer speed — why it's slow, and the plan to fix it
 
 > **Status:** P1 (anchoring) implemented behind the **"Fast analysis
-> (EXPERIMENTAL)"** setting (`analyze-fast`, default off). Falls back to the
-> normal full-replay path for any input it can't snapshot, and guards against
-> freed/removed checkpoints so it never crashes — worst case it's just slow.
-> P0 (horizon tightening) and P2 (prefilter) are still future work.
+> (EXPERIMENTAL)"** setting (`analyze-fast`, default off), **including the §4
+> determinism oracle**: each anchor is verified by an unshifted re-run compared
+> against the baseline x/y track, and dropped on drift (that input falls back
+> to full replay). Anchors carry their own RNG seeds + actual capture step, are
+> recaptured if the sped-up baseline falls back to 1x, and are cleared on
+> finish/cancel/level-change so practice-mode respawns are never hijacked.
+> The probe horizon is now `kHorizon` (240 ticks — landing deaths count), with
+> a converged-early-exit (grounded + baseline x/y/vy match ⇒ survived) doing
+> the practical work of P0. P2 (near-miss prefilter) is still future work.
 > Companion to `frame-perfect-analyzer.md` §4 (save-states) and §7.13.
 
 ## 1. Why it gets exponentially slower on long levels

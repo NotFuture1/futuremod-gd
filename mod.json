@@ -10,7 +10,10 @@
     "name": "Future Mod",
     "developer": "swift",
     "description": "Skip level endings with a key, plus a per-level macro recorder with an automatic frame-perfect analyzer.",
-    "tags": ["gameplay", "utility"],
+    "tags": [
+        "gameplay",
+        "utility"
+    ],
     "settings": {
         "skip-end": {
             "name": "Exit Level Ending",
@@ -66,7 +69,7 @@
         },
         "analyze-fast": {
             "name": "Fast analysis (EXPERIMENTAL)",
-            "description": "Snapshots the game state before each input and restarts probes from there instead of replaying the whole level every time, so long levels analyze far faster (near-linear instead of quadratic). EXPERIMENTAL: uses mid-level save-states which can occasionally desync on some levels/triggers. If counts look wrong, compare with this OFF (the normal, always-correct method). Falls back to the normal method for any input it can't snapshot.",
+            "description": "Snapshots the game state before each input and restarts probes from there instead of replaying the whole level every time, so long levels analyze far faster (near-linear instead of quadratic). Every snapshot is first VERIFIED by re-running it unshifted and comparing against the baseline trajectory; any snapshot that drifts is discarded and that input falls back to the normal full-replay method automatically. EXPERIMENTAL: if counts still look wrong, compare with this OFF.",
             "type": "bool",
             "default": false
         },

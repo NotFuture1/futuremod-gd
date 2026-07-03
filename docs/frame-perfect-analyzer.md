@@ -5,10 +5,19 @@
 > determinism gate, ±k perturbation probing with early exit (window > 4
 > ticks stops immediately), optional release analysis, and a scheduler
 > time-scale speed-up that is verified by a second sped-up baseline and
-> auto-falls back to 1x. Death detection is progress-based (`maxX` +
-> stall), NOT `destroyPlayer` (it can fire without killing). Not yet done:
-> `.gdr` import/export (§3), buffer classification (§6), save-state
-> acceleration (§4 — tried once, reverted; restores insta-killed the player).
+> auto-falls back to 1x. Probes survive a **240-tick horizon** (landing
+> deaths count; a probe can also resolve early when the trajectory
+> provably re-joins the baseline x/y/vy on the ground). Death detection is
+> movement-based (position frozen ≥24 ticks, or ≥4 with `m_isDead` set;
+> GD's own death auto-restart is a third, authoritative signal), NOT
+> `destroyPlayer` (fires without killing) and NOT forward-x progress
+> (2.2 reverse gameplay breaks it). Death attribution uses the *shifted*
+> press step, so an early-shifted press that dies before the original
+> step still counts. Save-state acceleration (§4) is in behind
+> `analyze-fast` with per-anchor seed capture and a per-anchor verify
+> pass against the baseline track (drift ⇒ that input falls back to full
+> replay). Not yet done: `.gdr` import/export (§3), buffer
+> classification (§6), near-miss prefilter (§7.13a).
 
 Goal: after a single piece of human input (a completed run / macro of a level),
 **automatically** determine how many "frame perfects" the run contains, and

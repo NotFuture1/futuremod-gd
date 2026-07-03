@@ -25,12 +25,14 @@ using namespace geode::prelude;
 
 namespace {
 
-constexpr int kMargin = 48;
-constexpr int kMaxK   = 8;
-constexpr int kFF     = 1;   // 1 = no fast-forward (FF corrupts physics -> false deaths)
-constexpr int kCap    = 8000;
-constexpr int kStall  = 24;   // steps with no forward progress => the player is dead
-constexpr float kBack = 8.f;  // x dropping this far => respawned (also a death)
+constexpr int kMargin  = 48;   // ticks past the last input the BASELINE / anchor-verify must reach
+constexpr int kHorizon = 240;  // ticks past the tested input a PROBE must survive: a shifted jump
+                               // often kills on LANDING ~100 ticks later, so 48 was far too short
+constexpr int kMaxK    = 8;
+constexpr int kFF      = 1;   // 1 = no fast-forward (FF corrupts physics -> false deaths)
+constexpr int kCap     = 8000;
+constexpr int kStall   = 24;  // ticks with no movement at all => the player is dead (fallback)
+constexpr int kDeadStall = 4; // ticks with no movement AND m_isDead set => dead (fast path)
 
 // Frame-perfect ding pitch by tier. The tighter the window, the lower the pitch:
 // a 60fps FP (window <=4, easiest) rings highest, a 240fps FP (window <=1,
@@ -104,21 +106,35 @@ struct Macro {
     bool baseline = false;
     bool testResolved = false, lastSurvived = false;
     int deathStep = -1;
-    // death = "player stopped advancing", measured from position (NOT destroyPlayer,
-    // which can fire without actually killing on some levels/setups).
-    float maxX = -1.f;        // furthest x reached this test
-    int lastProgressStep = 0; // step at which maxX last increased
+    // death = "player stopped MOVING" (NOT destroyPlayer, which can fire without
+    // killing; NOT forward-x progress, which 2.2 reverse gameplay breaks).
+    float lastCx = -1.e9f, lastCy = -1.e9f; // player position last step
+    int lastProgressStep = 0;               // step the player last moved at
+    bool inBeginTest = false; // our own resetLevel, vs GD's death auto-restart
     int c240 = 0, c120 = 0, c60 = 0;
+
+    // baseline player track at the same speed the probes run at. Used as the
+    // determinism oracle for anchors and for the converged-early-exit on probes.
+    struct BasePt { float x, y, vy; };
+    std::vector<BasePt> baseTrack;
+    bool trackBase = false; // recording baseTrack during the current baseline
 
     // --- experimental fast analysis (mid-level save-states) ---
     // Snapshot state just before each input during the baseline pass, then
-    // restore-instead-of-replay per probe: probes cost ~(kMaxK+kMargin) steps
+    // restore-instead-of-replay per probe: probes cost ~(kMaxK+kHorizon) steps
     // instead of replaying from the level start (O(L) instead of O(L^2)).
+    struct Anchor {
+        Ref<CheckpointObject> cp;
+        uint64_t seed1 = 0, seed2 = 0; // RNG state AT the snapshot, not level start
+        int step = 0;                  // step the snapshot was actually taken at
+    };
     bool fastMode = false;
     bool capturingAnchors = false;         // creating anchors during the baseline
     size_t nextAnchorCapture = 0;          // next target to snapshot as baseline advances
-    std::vector<int> anchorStep;           // per target: step its anchor is taken at
-    std::unordered_map<size_t, CheckpointObject*> anchors; // target idx -> checkpoint before it
+    std::vector<int> anchorStep;           // per target: step to take its anchor at
+    std::unordered_map<size_t, Anchor> anchors; // target idx -> snapshot before it
+    bool verifyingAnchor = false; // offset-0 re-run from the anchor, checked vs baseTrack
+    bool anchorDrift = false;     // the verify run diverged from the baseline
 
     // analysis results that persist for the live playback tally
     std::vector<std::pair<int, int>> savedWindows; // (input index, window ticks)
@@ -131,6 +147,19 @@ struct Macro {
     static Macro& get() { static Macro m; return m; }
 
     std::filesystem::path path() { return pathForKey(curKey); }
+
+    // step the tested press actually happens at in this probe (shifted when offset<0)
+    int effTargetStep() const {
+        int t = inputs[targets[targetIdx]].step;
+        return t + std::min(0, offset);
+    }
+
+    // a death only counts against the tested input if the run reached the SHIFTED
+    // press; anything earlier is upstream desync, not this shift's doing. deathStep
+    // is the last step the player still moved (~deathTick-1), hence the -2 slack.
+    bool deathCountsAgainstTarget() const {
+        return deathStep >= effTargetStep() - 2;
+    }
 
     void buildFpLists() {
         fp240.clear(); fp120.clear(); fp60.clear();
@@ -311,45 +340,85 @@ void beginTest() {
     m.testResolved = false;
     m.deathStep = -1;
     m.testFrames = 0;
-    m.marginEnd = m.baseline
-        ? (m.lastTargetStep + kMargin)
-        : (m.inputs[m.targets[m.targetIdx]].step + kMargin);
+    m.anchorDrift = false;
+    int tstep = m.baseline ? 0 : m.inputs[m.targets[m.targetIdx]].step;
+    m.marginEnd = m.baseline        ? (m.lastTargetStep + kMargin)
+                : m.verifyingAnchor ? (tstep + kMargin)
+                                    : (tstep + kHorizon);
 
-    // Fast mode: restore the snapshot taken just before this input instead of
-    // replaying from the level start. Guarded so any missing/removed anchor
-    // silently falls back to the normal full-replay path (never crashes).
     auto pl = PlayLayer::get();
     bool restored = false;
+    m.inBeginTest = true; // our resets are not death signals (see resetLevel hook)
+
+    // Fast mode: restore the snapshot taken just before this input instead of
+    // replaying from the level start. Guarded so any missing/removed/suspect
+    // anchor silently falls back to the normal full-replay path (never crashes).
     if (!m.baseline && m.fastMode && pl) {
         auto it = m.anchors.find(m.targetIdx);
-        if (it != m.anchors.end() && it->second
-            && pl->m_checkpointArray && pl->m_checkpointArray->containsObject(it->second)) {
-            pl->loadFromCheckpoint(it->second);
-            int as = m.anchorStep[m.targetIdx];
-            m.step = as;
-            m.gameTime = as / 240.0;
+        if (it != m.anchors.end() && it->second.cp
+            && it->second.step <= tstep - kMaxK - 2 // even a -kMaxK shift lands after it
+            && pl->m_checkpointArray && pl->m_checkpointArray->containsObject(it->second.cp)) {
+            auto const& a = it->second;
+            // resetLevel FIRST: it cancels any auto-respawn GD still has pending
+            // from the previous probe's death; the checkpoint then overrides it.
+            pl->resetLevel();
+            pl->loadFromCheckpoint(a.cp);
+            m.step = a.step;
+            m.gameTime = a.step / 240.0;
             m.playIndex = 0;
-            while (m.playIndex < m.inputs.size() && m.inputs[m.playIndex].step < as) m.playIndex++;
-            if (m.haveSeed) { pl->m_randomSeed = m.seed1; pl->m_replayRandSeed = m.seed2; }
-            // re-seed the progress-based death detector to the restore point, so a
-            // mid-level restore is NOT misread as a backward "respawn" -- this is
-            // exactly what insta-killed the earlier save-state attempt.
-            float px = pl->m_player1 ? pl->m_player1->getPosition().x : 0.f;
-            m.maxX = px;
-            m.lastProgressStep = as;
+            // inputs AT the anchor step are already baked into the snapshot
+            while (m.playIndex < m.inputs.size() && m.inputs[m.playIndex].step <= a.step) m.playIndex++;
+            // RNG state as it was when the snapshot was taken (not the level start)
+            pl->m_randomSeed = a.seed1;
+            pl->m_replayRandSeed = a.seed2;
+            // re-seed the movement-based death detector at the restore point, so a
+            // mid-level restore is NOT misread as a death -- this is exactly what
+            // insta-killed the earlier save-state attempt.
+            auto ppos = pl->m_player1 ? pl->m_player1->getPosition() : CCPoint{0.f, 0.f};
+            m.lastCx = ppos.x;
+            m.lastCy = ppos.y;
+            m.lastProgressStep = a.step;
             restored = true;
         }
     }
-    if (!restored) {
-        if (pl) pl->resetLevel();
-        m.maxX = -1.f;          // fresh progress tracking for this test
+    if (!restored && pl) {
+        if (m.baseline) {
+            // stale anchor checkpoints from a previous pass must never survive
+            // into a fresh (re)capture, or hijack a practice-mode respawn
+            pl->removeAllCheckpoints();
+        } else if (pl->m_isPracticeMode && pl->m_checkpointArray
+                   && pl->m_checkpointArray->count() > 0) {
+            // in practice mode resetLevel respawns at the LAST checkpoint -- our
+            // anchors would hijack the full replay. Drop them; affected targets
+            // fall back to the always-correct full-replay path.
+            log::info("[fp] practice mode: dropping {} anchors for clean full replays",
+                m.anchors.size());
+            pl->removeAllCheckpoints();
+            m.anchors.clear();
+        }
+        pl->resetLevel();
+        m.lastCx = m.lastCy = -1.e9f; // fresh movement tracking for this test
         m.lastProgressStep = 0;
     }
+    m.inBeginTest = false;
+}
+
+// begin analyzing target m.targetIdx: verify its anchor first (fast mode), then probe
+void startTarget() {
+    auto& m = Macro::get();
+    m.minSurv = m.maxSurv = 0;
+    m.negDead = m.posDead = false;
+    m.verifyingAnchor = m.fastMode && m.anchors.count(m.targetIdx) > 0;
+    m.offset = m.verifyingAnchor ? 0 : -1;
+    beginTest();
 }
 
 void finishAnalysis() {
     auto& m = Macro::get();
     setAnalyzeSpeed(1.f);
+    // don't leave anchor checkpoints behind (practice mode would respawn at them)
+    if (auto pl = PlayLayer::get()) pl->removeAllCheckpoints();
+    m.anchors.clear();
     m.savedWindows.clear();
     for (size_t i = 0; i < m.targets.size(); i++) {
         log::info("[fp] input #{} step {} window={} ticks",
@@ -389,26 +458,23 @@ void advanceAnalysis(bool survived) {
         updateHud();
         m.targetIdx++;
         if (m.targetIdx >= m.targets.size()) { finishAnalysis(); return; }
-        m.minSurv = m.maxSurv = 0;
-        m.negDead = m.posDead = false;
-        m.offset = -1;
-    } else {
-        // expand the narrower open side next: probes run -1, +1, -2, +2, ...
-        if (negOpen && (!posOpen || -m.minSurv <= m.maxSurv)) m.offset = m.minSurv - 1;
-        else m.offset = m.maxSurv + 1;
+        startTarget();
+        return;
     }
+    // expand the narrower open side next: probes run -1, +1, -2, +2, ...
+    if (negOpen && (!posOpen || -m.minSurv <= m.maxSurv)) m.offset = m.minSurv - 1;
+    else m.offset = m.maxSurv + 1;
     beginTest();
 }
 
 void startProbing() {
     auto& m = Macro::get();
     m.capturingAnchors = false; // anchors are all captured by now; probing never captures
-    log::info("[fp] probing {} inputs at {}x ({} anchors)", m.targets.size(), m.speed, m.anchors.size());
+    m.trackBase = false;
+    log::info("[fp] probing {} inputs at {}x ({} anchors, {} tracked steps)",
+        m.targets.size(), m.speed, m.anchors.size(), m.baseTrack.size());
     m.targetIdx = 0;
-    m.minSurv = m.maxSurv = 0;
-    m.negDead = m.posDead = false;
-    m.offset = -1;
-    beginTest();
+    startTarget();
 }
 
 void onTestResolved() {
@@ -418,23 +484,32 @@ void onTestResolved() {
             // second baseline, sped up: keep the speed-up only if the replay
             // stayed deterministic at that speed; otherwise probe at 1x
             m.speedPhase = false;
-            m.baseline = false;
             if (!m.lastSurvived) {
                 log::warn("[fp] baseline desyncs at {}x -> analyzing at 1x", m.speed);
                 notify(fmt::format("{}x speed-up unstable, analyzing at 1x", (int)m.speed),
                     NotificationIcon::Info);
                 m.speed = 1.f;
                 setAnalyzeSpeed(1.f);
-            } else {
-                log::info("[fp] baseline OK at {}x", m.speed);
+                // the sped-up pass desynced, so its anchors and track are garbage:
+                // re-run a 1x baseline to rebuild them at the probes' actual speed
+                m.anchors.clear();
+                m.baseTrack.clear();
+                m.trackBase = true;
+                m.capturingAnchors = m.fastMode;
+                m.nextAnchorCapture = 0;
+                beginTest(); // m.baseline stays true
+                return;
             }
+            log::info("[fp] baseline OK at {}x", m.speed);
+            m.baseline = false;
             startProbing();
             return;
         }
         if (!m.lastSurvived) {
             m.mode = Mode::Idle;
-            log::warn("[fp] baseline stopped progressing @ step {} (maxX {:.0f})",
-                m.deathStep, m.maxX);
+            setAnalyzeSpeed(1.f);
+            log::warn("[fp] baseline stopped moving @ step {} (x {:.0f})",
+                m.deathStep, m.lastCx);
             std::string msg;
             if (m.deathStep < 0)
                 msg = "Can't analyze: the replay didn't reach the end in time (timed out).\n"
@@ -450,18 +525,34 @@ void onTestResolved() {
             notify(msg, NotificationIcon::Error);
             return;
         }
-        log::info("[fp] baseline OK (reached step {}, maxX {:.0f})", m.step, m.maxX);
+        log::info("[fp] baseline OK (reached step {}, x {:.0f})", m.step, m.lastCx);
         if (m.speed > 1.f) {
-            // 1x is deterministic; now prove it still is at the requested speed
+            // 1x is deterministic; now prove it still is at the requested speed.
+            // Anchors AND the reference track are captured during THIS pass -- the
+            // one that runs at the same speed as the probes.
             m.speedPhase = true;
             setAnalyzeSpeed(m.speed);
-            // capture anchors during THIS (speed) baseline -- the pass right before probing
+            m.baseTrack.clear();
+            m.trackBase = true;
             if (m.fastMode) { m.capturingAnchors = true; m.nextAnchorCapture = 0; m.anchors.clear(); }
             beginTest();
             return;
         }
         m.baseline = false;
         startProbing();
+        return;
+    }
+    if (m.verifyingAnchor) {
+        // offset-0 re-run from the anchor: it must retrace the baseline exactly.
+        // Any drift or death = the snapshot is incomplete -> full replay instead.
+        m.verifyingAnchor = false;
+        if (m.anchorDrift || !m.lastSurvived) {
+            log::warn("[fp] anchor for input #{} failed verification ({}) -> full replay",
+                m.targets[m.targetIdx], m.anchorDrift ? "drift" : "death");
+            m.anchors.erase(m.targetIdx);
+        }
+        m.offset = -1;
+        beginTest();
         return;
     }
     advanceAnalysis(m.lastSurvived);
@@ -501,6 +592,11 @@ void startAnalysis() {
     for (size_t i = 0; i < m.targets.size(); i++)
         m.anchorStep[i] = std::max(0, m.inputs[m.targets[i]].step - kMaxK - 2);
     m.capturingAnchors = m.fastMode && (m.speed <= 1.f);
+    // the reference track records during whichever baseline runs at probe speed
+    m.baseTrack.clear();
+    m.trackBase = (m.speed <= 1.f);
+    m.verifyingAnchor = false;
+    m.anchorDrift = false;
     m.baseline = true;       // first run is the unshifted determinism check
     m.mode = Mode::Analyzing;
     updateHud();
@@ -601,39 +697,86 @@ class $modify(MacroBGL, GJBaseGameLayer) {
                 float tx = (m.step < static_cast<int>(m.track.size())) ? m.track[m.step].first : -1.f;
                 log::info("[fp] base step={} x={:.0f} trackx={:.0f}", m.step, pos.x, tx);
             }
+            // baseline at probe speed: record the reference track (anchor oracle +
+            // probe converged-early-exit both compare against it)
+            if (m.baseline && m.trackBase && m_player1) {
+                auto pos = m_player1->getPosition();
+                if (static_cast<int>(m.baseTrack.size()) <= m.step)
+                    m.baseTrack.resize(m.step + 1, { 0.f, 0.f, 0.f });
+                m.baseTrack[m.step] = { pos.x, pos.y,
+                    static_cast<float>(m_player1->m_yVelocity) };
+            }
             // fast mode: snapshot state just before each input as the baseline reaches it
             if (m.capturingAnchors && m.baseline) {
                 if (auto plc = PlayLayer::get()) {
                     while (m.nextAnchorCapture < m.targets.size()
                            && m.step >= m.anchorStep[m.nextAnchorCapture]) {
-                        if (auto cp = plc->markCheckpoint()) m.anchors[m.nextAnchorCapture] = cp;
+                        if (auto cp = plc->markCheckpoint())
+                            m.anchors[m.nextAnchorCapture] =
+                                { cp, plc->m_randomSeed, plc->m_replayRandSeed, m.step };
                         m.nextAnchorCapture++;
                     }
                 }
             }
-            // Death = the player stopped advancing. This ignores destroyPlayer entirely
-            // (it can fire without killing), so a player that keeps moving is "alive".
-            float cx = m_player1 ? m_player1->getPosition().x : m.maxX;
-            // forward progress resets the hang-guard, so long levels never time out;
-            // the guard only trips when the run is genuinely stuck (no progress).
-            if (cx > m.maxX + 0.2f) { m.maxX = cx; m.lastProgressStep = m.step; m.testFrames = 0; }
-            bool respawned = (cx < m.maxX - kBack);                  // x jumped backward
-            bool frozen = (m.step - m.lastProgressStep) >= kStall;   // x stuck in place
-            bool dead = respawned || frozen;
+            // Death = the player stopped MOVING. destroyPlayer can fire without
+            // killing, and forward-x progress breaks on 2.2 reverse gameplay --
+            // but a dead player's position freezes, and a moving player is alive.
+            float cx = m.lastCx, cy = m.lastCy;
+            bool deadFlag = false;
+            if (m_player1) {
+                auto pos = m_player1->getPosition();
+                cx = pos.x; cy = pos.y;
+                deadFlag = m_player1->m_isDead;
+            }
+            bool moved = std::fabs(cx - m.lastCx) > 0.05f || std::fabs(cy - m.lastCy) > 0.05f;
+            // movement resets the hang-guard, so long levels never time out; the
+            // guard only trips when the run is genuinely stuck.
+            if (moved) { m.lastProgressStep = m.step; m.testFrames = 0; }
+            m.lastCx = cx; m.lastCy = cy;
+            int still = m.step - m.lastProgressStep;
+            // m_isDead + a few frozen ticks resolves fast; the plain stall is the
+            // fallback in case the flag is ever set spuriously (a MOVING player is
+            // alive no matter what the flag says).
+            bool dead = (deadFlag && still >= kDeadStall) || still >= kStall;
             if (dead) m.deathStep = m.lastProgressStep;
 
             if (m.baseline) {
                 if (dead) { m.testResolved = true; m.lastSurvived = false; }
                 else if (m.step >= m.marginEnd) { m.testResolved = true; m.lastSurvived = true; }
+            } else if (m.verifyingAnchor) {
+                // the offset-0 verify run must retrace the baseline track exactly;
+                // drift = incomplete snapshot -> the anchor can't be trusted
+                if (!dead && m_player1 && m.step < static_cast<int>(m.baseTrack.size())) {
+                    auto const& bt = m.baseTrack[m.step];
+                    if (std::fabs(cx - bt.x) > 0.1f || std::fabs(cy - bt.y) > 0.1f) {
+                        m.anchorDrift = true;
+                        m.testResolved = true;
+                        m.lastSurvived = false;
+                    }
+                }
+                if (!m.testResolved) {
+                    if (dead) { m.testResolved = true; m.lastSurvived = false; }
+                    else if (m.step >= m.marginEnd) { m.testResolved = true; m.lastSurvived = true; }
+                }
             } else if (dead) {
                 m.testResolved = true;
-                // a death only counts against this jump if we actually reached it;
-                // an earlier death is upstream desync, not the shift's doing.
-                int tstep = m.inputs[m.targets[m.targetIdx]].step;
-                m.lastSurvived = (m.deathStep < tstep);
+                m.lastSurvived = !m.deathCountsAgainstTarget();
             } else if (m.step >= m.marginEnd) {
                 m.testResolved = true;
                 m.lastSurvived = true;
+            } else if (m_player1 && !deadFlag && m_player1->m_isOnGround
+                       && (!m_player2 || !m_player2->isVisible())
+                       && m.step > m.inputs[m.targets[m.targetIdx]].step + kMaxK + 2
+                       && m.step < static_cast<int>(m.baseTrack.size())) {
+                // early exit: grounded at the baseline's exact x/y/vy means the
+                // trajectory has re-joined the baseline -- the rest of the run IS
+                // the baseline, no need to simulate the remaining horizon.
+                auto const& bt = m.baseTrack[m.step];
+                if (std::fabs(cx - bt.x) < 0.1f && std::fabs(cy - bt.y) < 0.1f
+                    && std::fabs(static_cast<float>(m_player1->m_yVelocity) - bt.vy) < 0.1f) {
+                    m.testResolved = true;
+                    m.lastSurvived = true;
+                }
             }
         }
     }
@@ -648,7 +791,10 @@ class $modify(MacroBGL, GJBaseGameLayer) {
             if (!m.testResolved && ++m.testFrames > 2400) {
                 log::warn("[fp] test timeout (target {}, offset {})", m.targetIdx, m.offset);
                 m.testResolved = true;
-                m.lastSurvived = !m.baseline; // baseline that never settles = desync, not a pass
+                // baseline that never settles = desync; a verify that never settles =
+                // untrustworthy anchor; a probe that never settles = survived (a
+                // timeout must never fabricate a frame-perfect)
+                m.lastSurvived = !m.baseline && !m.verifyingAnchor;
             }
             if (m.testResolved) {
                 m.testResolved = false;
@@ -670,6 +816,7 @@ class $modify(MacroPlayLayer, PlayLayer) {
         // eats it) and auto-replay the wrong macro
         if (m.mode == Mode::Analyzing) setAnalyzeSpeed(1.f);
         m.mode = Mode::Idle;
+        m.anchors.clear(); // never keep checkpoint refs from another level
         // auto-load this level's saved macro (clears if none)
         if (macroEnabled()) m.loadForLevel(levelKeyFor(level));
         return true;
@@ -679,6 +826,7 @@ class $modify(MacroPlayLayer, PlayLayer) {
         auto& m = Macro::get();
         if (m.mode == Mode::Analyzing) setAnalyzeSpeed(1.f);
         m.mode = Mode::Idle;
+        m.anchors.clear();
         PlayLayer::onQuit();
     }
 
@@ -707,13 +855,19 @@ class $modify(MacroPlayLayer, PlayLayer) {
             m.pi240 = m.pi120 = m.pi60 = 0; // restart the live tally
             if (m.haveSeed) { m_randomSeed = m.seed1; m_replayRandSeed = m.seed2; }
         } else if (m.mode == Mode::Analyzing) {
+            if (!m.inBeginTest && !m.testResolved) {
+                // GD reset the level on its own (the post-death auto-restart):
+                // an authoritative death signal, no position heuristics needed.
+                m.deathStep = m.lastProgressStep;
+                m.testResolved = true;
+                if (m.baseline || m.verifyingAnchor) m.lastSurvived = false;
+                else m.lastSurvived = !m.deathCountsAgainstTarget();
+                log::debug("[fp] external reset -> death @ step {} (target {}, offset {})",
+                    m.deathStep, m.targetIdx, m.offset);
+            }
             m.playIndex = 0;
             m.step = 0;
             m.gameTime = 0;
-            m.deathStep = -1;
-            // NOTE: deliberately do NOT reset maxX here -- after a death-respawn the
-            // replay restarts at x~0, which stays below maxX and reads as "no progress"
-            // (i.e. a death), which is exactly what we want to detect.
             if (m.haveSeed) { m_randomSeed = m.seed1; m_replayRandSeed = m.seed2; }
         }
     }
@@ -848,6 +1002,9 @@ $execute {
             if (Macro::get().mode == Mode::Analyzing) {
                 Macro::get().mode = Mode::Idle;
                 setAnalyzeSpeed(1.f);
+                // don't leave anchor checkpoints behind (practice would respawn at them)
+                if (auto pl = PlayLayer::get()) pl->removeAllCheckpoints();
+                Macro::get().anchors.clear();
                 notify("Analyze: cancelled", NotificationIcon::Info);
             }
             else startAnalysis();
