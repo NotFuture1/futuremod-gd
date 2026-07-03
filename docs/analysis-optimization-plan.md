@@ -1,7 +1,11 @@
 # Analyzer speed — why it's slow, and the plan to fix it
 
-> Plan only (not yet implemented). Companion to
-> `frame-perfect-analyzer.md` §4 (save-states) and §7.13 (performance).
+> **Status:** P1 (anchoring) implemented behind the **"Fast analysis
+> (EXPERIMENTAL)"** setting (`analyze-fast`, default off). Falls back to the
+> normal full-replay path for any input it can't snapshot, and guards against
+> freed/removed checkpoints so it never crashes — worst case it's just slow.
+> P0 (horizon tightening) and P2 (prefilter) are still future work.
+> Companion to `frame-perfect-analyzer.md` §4 (save-states) and §7.13.
 
 ## 1. Why it gets exponentially slower on long levels
 

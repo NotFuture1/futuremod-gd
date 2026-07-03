@@ -64,6 +64,12 @@
             "type": "bool",
             "default": false
         },
+        "analyze-fast": {
+            "name": "Fast analysis (EXPERIMENTAL)",
+            "description": "Snapshots the game state before each input and restarts probes from there instead of replaying the whole level every time, so long levels analyze far faster (near-linear instead of quadratic). EXPERIMENTAL: uses mid-level save-states which can occasionally desync on some levels/triggers. If counts look wrong, compare with this OFF (the normal, always-correct method). Falls back to the normal method for any input it can't snapshot.",
+            "type": "bool",
+            "default": false
+        },
         "analyze-display-title": {
             "name": "Frame-perfect display rates",
             "type": "title"

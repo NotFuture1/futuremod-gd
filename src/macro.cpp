@@ -110,6 +110,16 @@ struct Macro {
     int lastProgressStep = 0; // step at which maxX last increased
     int c240 = 0, c120 = 0, c60 = 0;
 
+    // --- experimental fast analysis (mid-level save-states) ---
+    // Snapshot state just before each input during the baseline pass, then
+    // restore-instead-of-replay per probe: probes cost ~(kMaxK+kMargin) steps
+    // instead of replaying from the level start (O(L) instead of O(L^2)).
+    bool fastMode = false;
+    bool capturingAnchors = false;         // creating anchors during the baseline
+    size_t nextAnchorCapture = 0;          // next target to snapshot as baseline advances
+    std::vector<int> anchorStep;           // per target: step its anchor is taken at
+    std::unordered_map<size_t, CheckpointObject*> anchors; // target idx -> checkpoint before it
+
     // analysis results that persist for the live playback tally
     std::vector<std::pair<int, int>> savedWindows; // (input index, window ticks)
     // live playback tally: sorted steps of frame-perfect jumps per rate
@@ -304,9 +314,37 @@ void beginTest() {
     m.marginEnd = m.baseline
         ? (m.lastTargetStep + kMargin)
         : (m.inputs[m.targets[m.targetIdx]].step + kMargin);
-    if (auto pl = PlayLayer::get()) pl->resetLevel();
-    m.maxX = -1.f;          // fresh progress tracking for this test
-    m.lastProgressStep = 0;
+
+    // Fast mode: restore the snapshot taken just before this input instead of
+    // replaying from the level start. Guarded so any missing/removed anchor
+    // silently falls back to the normal full-replay path (never crashes).
+    auto pl = PlayLayer::get();
+    bool restored = false;
+    if (!m.baseline && m.fastMode && pl) {
+        auto it = m.anchors.find(m.targetIdx);
+        if (it != m.anchors.end() && it->second
+            && pl->m_checkpointArray && pl->m_checkpointArray->containsObject(it->second)) {
+            pl->loadFromCheckpoint(it->second);
+            int as = m.anchorStep[m.targetIdx];
+            m.step = as;
+            m.gameTime = as / 240.0;
+            m.playIndex = 0;
+            while (m.playIndex < m.inputs.size() && m.inputs[m.playIndex].step < as) m.playIndex++;
+            if (m.haveSeed) { pl->m_randomSeed = m.seed1; pl->m_replayRandSeed = m.seed2; }
+            // re-seed the progress-based death detector to the restore point, so a
+            // mid-level restore is NOT misread as a backward "respawn" -- this is
+            // exactly what insta-killed the earlier save-state attempt.
+            float px = pl->m_player1 ? pl->m_player1->getPosition().x : 0.f;
+            m.maxX = px;
+            m.lastProgressStep = as;
+            restored = true;
+        }
+    }
+    if (!restored) {
+        if (pl) pl->resetLevel();
+        m.maxX = -1.f;          // fresh progress tracking for this test
+        m.lastProgressStep = 0;
+    }
 }
 
 void finishAnalysis() {
@@ -364,7 +402,8 @@ void advanceAnalysis(bool survived) {
 
 void startProbing() {
     auto& m = Macro::get();
-    log::info("[fp] probing {} inputs at {}x", m.targets.size(), m.speed);
+    m.capturingAnchors = false; // anchors are all captured by now; probing never captures
+    log::info("[fp] probing {} inputs at {}x ({} anchors)", m.targets.size(), m.speed, m.anchors.size());
     m.targetIdx = 0;
     m.minSurv = m.maxSurv = 0;
     m.negDead = m.posDead = false;
@@ -416,6 +455,8 @@ void onTestResolved() {
             // 1x is deterministic; now prove it still is at the requested speed
             m.speedPhase = true;
             setAnalyzeSpeed(m.speed);
+            // capture anchors during THIS (speed) baseline -- the pass right before probing
+            if (m.fastMode) { m.capturingAnchors = true; m.nextAnchorCapture = 0; m.anchors.clear(); }
             beginTest();
             return;
         }
@@ -449,6 +490,17 @@ void startAnalysis() {
     int cps = pl->m_checkpointArray ? pl->m_checkpointArray->count() : 0;
     log::info("[fp] startAnalysis: {} inputs, {} checkpoints (clearing)", m.inputs.size(), cps);
     pl->removeAllCheckpoints();
+    // experimental fast analysis: snapshot state before each input so probes
+    // restart from there instead of the level start. Anchors are captured during
+    // the baseline pass that immediately precedes probing (this one when speed==1,
+    // else the sped-up re-verify baseline).
+    m.fastMode = Mod::get()->getSettingValue<bool>("analyze-fast");
+    m.anchors.clear();
+    m.nextAnchorCapture = 0;
+    m.anchorStep.assign(m.targets.size(), 0);
+    for (size_t i = 0; i < m.targets.size(); i++)
+        m.anchorStep[i] = std::max(0, m.inputs[m.targets[i]].step - kMaxK - 2);
+    m.capturingAnchors = m.fastMode && (m.speed <= 1.f);
     m.baseline = true;       // first run is the unshifted determinism check
     m.mode = Mode::Analyzing;
     updateHud();
@@ -548,6 +600,16 @@ class $modify(MacroBGL, GJBaseGameLayer) {
                 auto pos = m_player1->getPosition();
                 float tx = (m.step < static_cast<int>(m.track.size())) ? m.track[m.step].first : -1.f;
                 log::info("[fp] base step={} x={:.0f} trackx={:.0f}", m.step, pos.x, tx);
+            }
+            // fast mode: snapshot state just before each input as the baseline reaches it
+            if (m.capturingAnchors && m.baseline) {
+                if (auto plc = PlayLayer::get()) {
+                    while (m.nextAnchorCapture < m.targets.size()
+                           && m.step >= m.anchorStep[m.nextAnchorCapture]) {
+                        if (auto cp = plc->markCheckpoint()) m.anchors[m.nextAnchorCapture] = cp;
+                        m.nextAnchorCapture++;
+                    }
+                }
             }
             // Death = the player stopped advancing. This ignores destroyPlayer entirely
             // (it can fire without killing), so a player that keeps moving is "alive".
