@@ -32,6 +32,13 @@ constexpr int kCap    = 8000;
 constexpr int kStall  = 24;   // steps with no forward progress => the player is dead
 constexpr float kBack = 8.f;  // x dropping this far => respawned (also a death)
 
+// Frame-perfect ding pitch by tier. The tighter the window, the lower the pitch:
+// a 60fps FP (window <=4, easiest) rings highest, a 240fps FP (window <=1,
+// hardest) rings lowest -- so the pitch tells you how tight the input was.
+constexpr float kDing60  = 1.50f; // easiest  -> highest
+constexpr float kDing120 = 1.15f;
+constexpr float kDing240 = 0.85f; // hardest  -> lowest
+
 enum class Mode { Idle, Recording, Playing, Analyzing };
 
 struct InputEdge {
@@ -179,9 +186,10 @@ void notify(std::string const& msg, NotificationIcon icon) {
     Notification::create(msg, icon)->show();
 }
 
-void playDing() {
+// speed doubles as pitch: >1 higher/faster, <1 lower/slower (FMOD frequency).
+void playDing(float speed = 1.f) {
     if (auto fae = FMODAudioEngine::sharedEngine())
-        fae->playEffect("achievement_01.ogg");
+        fae->playEffect("achievement_01.ogg", speed, 1.f, 1.f);
 }
 
 // Analysis speed-up = plain scheduler time scale (the same mechanism as a
@@ -335,7 +343,9 @@ void advanceAnalysis(bool survived) {
     // than 4 ticks isn't frame-perfect at 240/120/60, exact width is wasted tests
     if (w > 4 || (!negOpen && !posOpen)) {
         m.windowTicks[m.targetIdx] = w;
-        if (w <= 1) { m.c240++; playDing(); }
+        // during analysis, ding only when the hardest tier (240) is found, at its
+        // low pitch. The full tiered pitch plays back on replay (below).
+        if (w <= 1) { m.c240++; playDing(kDing240); }
         if (w <= 2) m.c120++;
         if (w <= 4) m.c60++;
         updateHud();
@@ -528,7 +538,10 @@ class $modify(MacroBGL, GJBaseGameLayer) {
             bool s120 = Mod::get()->getSettingValue<bool>("show-120");
             bool s60  = Mod::get()->getSettingValue<bool>("show-60");
             if (!s240 && !s120 && !s60) s240 = true; // mirror the HUD default
-            if ((s240 && a240) || (s120 && a120) || (s60 && a60)) playDing();
+            // ding pitched by the tightest SHOWN tier this click hit (240 lowest).
+            bool d240 = s240 && a240, d120 = s120 && a120, d60 = s60 && a60;
+            if (d240 || d120 || d60)
+                playDing(d240 ? kDing240 : d120 ? kDing120 : kDing60);
             if (a240 || a120 || a60) updateHud();
         } else if (m.mode == Mode::Analyzing && !m.testResolved) {
             if (m.baseline && m.step >= 1 && m.step <= 6 && m_player1) {
