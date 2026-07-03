@@ -25,9 +25,17 @@ using namespace geode::prelude;
 
 namespace {
 
-constexpr int kMargin  = 48;   // ticks past the last input the BASELINE / anchor-verify must reach
-constexpr int kHorizon = 240;  // ticks past the tested input a PROBE must survive: a shifted jump
-                               // often kills on LANDING ~100 ticks later, so 48 was far too short
+constexpr int kMargin     = 48;  // ticks past the last input the BASELINE / anchor-verify must reach
+// PROBE horizon: how far past the tested input we simulate before declaring it
+// survived. It ends at the NEXT recorded input -- after that input fires (at its
+// original step) the following input's timing governs survival, not this one's.
+// A flat long horizon was the "everything is frame-perfect" bug: a 1-tick shift
+// compounds across many downstream hazards and *eventually* kills, so every
+// window collapsed to 1. Bounding at the next input keeps each window measuring
+// only THIS input's tolerance. Clamped so we still clear an immediate hazard
+// (min) and cap a pathological gap with no inputs (max).
+constexpr int kMinHorizon = 24;
+constexpr int kMaxHorizon = 240;
 constexpr int kMaxK    = 8;
 constexpr int kFF      = 1;   // 1 = no fast-forward (FF corrupts physics -> false deaths)
 constexpr int kCap     = 8000;
@@ -113,11 +121,13 @@ struct Macro {
     bool inBeginTest = false; // our own resetLevel, vs GD's death auto-restart
     int c240 = 0, c120 = 0, c60 = 0;
 
-    // baseline player track at the same speed the probes run at. Used as the
-    // determinism oracle for anchors and for the converged-early-exit on probes.
+    // the 1x baseline player track -- the GROUND TRUTH. Used to verify any speed-up
+    // reproduces 1x tick-for-tick, to validate anchors, and for the probe early-exit.
     struct BasePt { float x, y, vy; };
     std::vector<BasePt> baseTrack;
-    bool trackBase = false; // recording baseTrack during the current baseline
+    bool trackBase = false;    // recording baseTrack (only during the 1x baseline)
+    bool checkingSpeed = false; // comparing a sped-up baseline against baseTrack
+    bool speedDrift = false;    // the sped-up baseline diverged from 1x
 
     // --- experimental fast analysis (mid-level save-states) ---
     // Snapshot state just before each input during the baseline pass, then
@@ -342,9 +352,17 @@ void beginTest() {
     m.testFrames = 0;
     m.anchorDrift = false;
     int tstep = m.baseline ? 0 : m.inputs[m.targets[m.targetIdx]].step;
-    m.marginEnd = m.baseline        ? (m.lastTargetStep + kMargin)
-                : m.verifyingAnchor ? (tstep + kMargin)
-                                    : (tstep + kHorizon);
+    if (m.baseline) {
+        m.marginEnd = m.lastTargetStep + kMargin;
+    } else if (m.verifyingAnchor) {
+        m.marginEnd = tstep + kMargin;
+    } else {
+        // horizon ends at the NEXT recorded input (of any kind), clamped
+        size_t ti = m.targets[m.targetIdx];
+        int nextStep = (ti + 1 < m.inputs.size()) ? m.inputs[ti + 1].step
+                                                  : tstep + kMaxHorizon;
+        m.marginEnd = tstep + std::clamp(nextStep - tstep, kMinHorizon, kMaxHorizon);
+    }
 
     auto pl = PlayLayer::get();
     bool restored = false;
@@ -382,21 +400,17 @@ void beginTest() {
         }
     }
     if (!restored && pl) {
-        if (m.baseline) {
-            // stale anchor checkpoints from a previous pass must never survive
-            // into a fresh (re)capture, or hijack a practice-mode respawn
-            pl->removeAllCheckpoints();
-        } else if (pl->m_isPracticeMode && pl->m_checkpointArray
-                   && pl->m_checkpointArray->count() > 0) {
-            // in practice mode resetLevel respawns at the LAST checkpoint -- our
-            // anchors would hijack the full replay. Drop them; affected targets
-            // fall back to the always-correct full-replay path.
-            log::info("[fp] practice mode: dropping {} anchors for clean full replays",
-                m.anchors.size());
-            pl->removeAllCheckpoints();
-            m.anchors.clear();
-        }
-        pl->resetLevel();
+        // resetLevelFromStart() ALWAYS restarts at the level start -- unlike
+        // resetLevel(), which in practice mode respawns at the last checkpoint and
+        // silently desyncs the replay (a false-death / overcount source). It also
+        // means practice-mode auto-checkpoints never hijack a probe.
+        pl->resetLevelFromStart();
+        // resetLevelFromStart may not route through our resetLevel hook, so set the
+        // replay bookkeeping explicitly (idempotent if the hook also ran).
+        m.step = 0;
+        m.gameTime = 0;
+        m.playIndex = 0;
+        if (m.haveSeed) { pl->m_randomSeed = m.seed1; pl->m_replayRandSeed = m.seed2; }
         m.lastCx = m.lastCy = -1.e9f; // fresh movement tracking for this test
         m.lastProgressStep = 0;
     }
@@ -481,26 +495,24 @@ void onTestResolved() {
     auto& m = Macro::get();
     if (m.baseline) {
         if (m.speedPhase) {
-            // second baseline, sped up: keep the speed-up only if the replay
-            // stayed deterministic at that speed; otherwise probe at 1x
+            // second baseline, sped up: keep the speed-up ONLY if it reproduced the
+            // 1x trajectory tick-for-tick (checkingSpeed). "Survived" isn't enough --
+            // a sped-up run can stay alive yet follow a slightly different path, and
+            // then every probe measures the wrong physics. Any drift -> analyze at 1x.
             m.speedPhase = false;
-            if (!m.lastSurvived) {
-                log::warn("[fp] baseline desyncs at {}x -> analyzing at 1x", m.speed);
-                notify(fmt::format("{}x speed-up unstable, analyzing at 1x", (int)m.speed),
-                    NotificationIcon::Info);
+            m.checkingSpeed = false;
+            if (!m.lastSurvived || m.speedDrift) {
+                log::warn("[fp] {}x diverges from 1x ({}) -> analyzing at 1x",
+                    m.speed, m.speedDrift ? "trajectory drift" : "death");
+                notify(fmt::format("{}x speed-up not deterministic, analyzing at 1x",
+                    (int)m.speed), NotificationIcon::Info);
                 m.speed = 1.f;
                 setAnalyzeSpeed(1.f);
-                // the sped-up pass desynced, so its anchors and track are garbage:
-                // re-run a 1x baseline to rebuild them at the probes' actual speed
-                m.anchors.clear();
-                m.baseTrack.clear();
-                m.trackBase = true;
-                m.capturingAnchors = m.fastMode;
-                m.nextAnchorCapture = 0;
-                beginTest(); // m.baseline stays true
-                return;
+                m.anchors.clear(); // captured at the bad speed -> unusable at 1x
+                // baseTrack is the good 1x reference; keep it. Probes full-replay at 1x.
+            } else {
+                log::info("[fp] {}x verified against the 1x baseline", m.speed);
             }
-            log::info("[fp] baseline OK at {}x", m.speed);
             m.baseline = false;
             startProbing();
             return;
@@ -525,15 +537,16 @@ void onTestResolved() {
             notify(msg, NotificationIcon::Error);
             return;
         }
-        log::info("[fp] baseline OK (reached step {}, x {:.0f})", m.step, m.lastCx);
+        log::info("[fp] 1x baseline OK (reached step {}, x {:.0f}, {} tracked)",
+            m.step, m.lastCx, m.baseTrack.size());
         if (m.speed > 1.f) {
-            // 1x is deterministic; now prove it still is at the requested speed.
-            // Anchors AND the reference track are captured during THIS pass -- the
-            // one that runs at the same speed as the probes.
+            // 1x is deterministic and recorded as baseTrack. Now prove the speed-up
+            // reproduces it tick-for-tick before trusting probes at that speed.
             m.speedPhase = true;
+            m.checkingSpeed = true; // compare this pass against baseTrack, don't overwrite it
+            m.speedDrift = false;
+            m.trackBase = false;
             setAnalyzeSpeed(m.speed);
-            m.baseTrack.clear();
-            m.trackBase = true;
             if (m.fastMode) { m.capturingAnchors = true; m.nextAnchorCapture = 0; m.anchors.clear(); }
             beginTest();
             return;
@@ -592,9 +605,11 @@ void startAnalysis() {
     for (size_t i = 0; i < m.targets.size(); i++)
         m.anchorStep[i] = std::max(0, m.inputs[m.targets[i]].step - kMaxK - 2);
     m.capturingAnchors = m.fastMode && (m.speed <= 1.f);
-    // the reference track records during whichever baseline runs at probe speed
+    // the 1x baseline is always the ground-truth reference track
     m.baseTrack.clear();
-    m.trackBase = (m.speed <= 1.f);
+    m.trackBase = true;
+    m.checkingSpeed = false;
+    m.speedDrift = false;
     m.verifyingAnchor = false;
     m.anchorDrift = false;
     m.baseline = true;       // first run is the unshifted determinism check
@@ -697,14 +712,26 @@ class $modify(MacroBGL, GJBaseGameLayer) {
                 float tx = (m.step < static_cast<int>(m.track.size())) ? m.track[m.step].first : -1.f;
                 log::info("[fp] base step={} x={:.0f} trackx={:.0f}", m.step, pos.x, tx);
             }
-            // baseline at probe speed: record the reference track (anchor oracle +
-            // probe converged-early-exit both compare against it)
+            // 1x baseline: record the ground-truth reference track (anchor oracle,
+            // speed-up verification, and the probe early-exit all compare to it)
             if (m.baseline && m.trackBase && m_player1) {
                 auto pos = m_player1->getPosition();
                 if (static_cast<int>(m.baseTrack.size()) <= m.step)
                     m.baseTrack.resize(m.step + 1, { 0.f, 0.f, 0.f });
                 m.baseTrack[m.step] = { pos.x, pos.y,
                     static_cast<float>(m_player1->m_yVelocity) };
+            }
+            // speed-up verification: the sped-up baseline must retrace the 1x track.
+            // Any real divergence means the speed-up changed the physics -> fall to 1x.
+            if (m.baseline && m.checkingSpeed && m_player1
+                && m.step < static_cast<int>(m.baseTrack.size())) {
+                auto pos = m_player1->getPosition();
+                auto const& bt = m.baseTrack[m.step];
+                if (std::fabs(pos.x - bt.x) > 0.25f || std::fabs(pos.y - bt.y) > 0.25f) {
+                    m.speedDrift = true;
+                    m.testResolved = true;
+                    m.lastSurvived = false;
+                }
             }
             // fast mode: snapshot state just before each input as the baseline reaches it
             if (m.capturingAnchors && m.baseline) {

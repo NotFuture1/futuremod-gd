@@ -7,9 +7,11 @@
 > to full replay). Anchors carry their own RNG seeds + actual capture step, are
 > recaptured if the sped-up baseline falls back to 1x, and are cleared on
 > finish/cancel/level-change so practice-mode respawns are never hijacked.
-> The probe horizon is now `kHorizon` (240 ticks — landing deaths count), with
-> a converged-early-exit (grounded + baseline x/y/vy match ⇒ survived) doing
-> the practical work of P0. P2 (near-miss prefilter) is still future work.
+> The probe horizon **ends at the next recorded input** (clamped 24–240 ticks) —
+> a flat 240 attributed far-downstream compounding deaths to the wrong input and
+> made everything read frame-perfect. A converged-early-exit (grounded + baseline
+> x/y/vy match ⇒ survived) does the rest of P0. P2 (near-miss prefilter) is still
+> future work.
 > Companion to `frame-perfect-analyzer.md` §4 (save-states) and §7.13.
 
 ## 1. Why it gets exponentially slower on long levels
