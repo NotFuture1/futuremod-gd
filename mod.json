@@ -55,9 +55,9 @@
         },
         "analyze-speed": {
             "name": "Analyzer speed-up",
-            "description": "Game speed while analyzing. 1 = real time (recommended, always correct). Higher is faster but the analyzer only uses it if a sped-up baseline reproduces your 1x run tick-for-tick; otherwise it automatically drops back to 1x. If your frame-perfect counts ever look wrong, set this to 1.",
+            "description": "How fast to run the analysis. The analyzer tries this speed, and if a sped-up baseline doesn't reproduce your real 1x run tick-for-tick it automatically steps down (8x->4x->2x->1x) until it finds the fastest speed that stays exact. So a higher number is safe: it only ever speeds things up when it's provably identical to 1x. Long levels benefit most. For the biggest levels also enable 'Fast analysis'.",
             "type": "int",
-            "default": 1,
+            "default": 4,
             "min": 1,
             "max": 8
         },

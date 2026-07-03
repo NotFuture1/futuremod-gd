@@ -145,6 +145,7 @@ struct Macro {
     std::unordered_map<size_t, Anchor> anchors; // target idx -> snapshot before it
     bool verifyingAnchor = false; // offset-0 re-run from the anchor, checked vs baseTrack
     bool anchorDrift = false;     // the verify run diverged from the baseline
+    int nAnchored = 0, nFull = 0; // probes served by a restore vs a full replay (diag)
 
     // analysis results that persist for the live playback tally
     std::vector<std::pair<int, int>> savedWindows; // (input index, window ticks)
@@ -354,10 +355,11 @@ void beginTest() {
     int tstep = m.baseline ? 0 : m.inputs[m.targets[m.targetIdx]].step;
     if (m.baseline) {
         m.marginEnd = m.lastTargetStep + kMargin;
-    } else if (m.verifyingAnchor) {
-        m.marginEnd = tstep + kMargin;
     } else {
-        // horizon ends at the NEXT recorded input (of any kind), clamped
+        // Probe AND anchor-verify use the SAME horizon: it ends at the next recorded
+        // input (clamped). The verify (offset 0 from the anchor) must reproduce the
+        // 1x baseline over this whole window, which is exactly the window probes use
+        // -- so a passing anchor is trustworthy for every probe taken from it.
         size_t ti = m.targets[m.targetIdx];
         int nextStep = (ti + 1 < m.inputs.size()) ? m.inputs[ti + 1].step
                                                   : tstep + kMaxHorizon;
@@ -397,8 +399,10 @@ void beginTest() {
             m.lastCy = ppos.y;
             m.lastProgressStep = a.step;
             restored = true;
+            if (!m.verifyingAnchor) m.nAnchored++;
         }
     }
+    if (!m.baseline && !m.verifyingAnchor && !restored) m.nFull++;
     if (!restored && pl) {
         // resetLevelFromStart() ALWAYS restarts at the level start -- unlike
         // resetLevel(), which in practice mode respawns at the last checkpoint and
@@ -440,6 +444,10 @@ void finishAnalysis() {
         m.savedWindows.push_back({ static_cast<int>(m.targets[i]), m.windowTicks[i] });
     }
     log::info("[fp] DONE -> 240:{} 120:{} 60:{}", m.c240, m.c120, m.c60);
+    if (m.fastMode)
+        log::info("[fp] fast mode: {} probes from a save-state, {} full replays "
+            "(low anchored count = checkpoints not reproducing -> ran the slow safe path)",
+            m.nAnchored, m.nFull);
     m.save(); // persist windows so the live playback tally survives restarts
     updateHud(); // while still Analyzing, so the HUD shows the final counts
     m.mode = Mode::Idle;
@@ -495,26 +503,43 @@ void onTestResolved() {
     auto& m = Macro::get();
     if (m.baseline) {
         if (m.speedPhase) {
-            // second baseline, sped up: keep the speed-up ONLY if it reproduced the
-            // 1x trajectory tick-for-tick (checkingSpeed). "Survived" isn't enough --
-            // a sped-up run can stay alive yet follow a slightly different path, and
-            // then every probe measures the wrong physics. Any drift -> analyze at 1x.
-            m.speedPhase = false;
-            m.checkingSpeed = false;
-            if (!m.lastSurvived || m.speedDrift) {
-                log::warn("[fp] {}x diverges from 1x ({}) -> analyzing at 1x",
-                    m.speed, m.speedDrift ? "trajectory drift" : "death");
-                notify(fmt::format("{}x speed-up not deterministic, analyzing at 1x",
-                    (int)m.speed), NotificationIcon::Info);
-                m.speed = 1.f;
-                setAnalyzeSpeed(1.f);
-                m.anchors.clear(); // captured at the bad speed -> unusable at 1x
-                // baseTrack is the good 1x reference; keep it. Probes full-replay at 1x.
-            } else {
+            // Sped-up baseline: keep this speed ONLY if it reproduced the 1x
+            // trajectory tick-for-tick (checkingSpeed). "Survived" isn't enough -- a
+            // sped-up run can stay alive yet follow a slightly different path, and
+            // then every probe measures the wrong physics. If it diverges, AUTO-TUNE
+            // DOWN (halve) and re-verify: GD drops physics substeps only past some
+            // per-frame speed, so the fastest speed that matches 1x is machine/level
+            // dependent -- find it instead of giving up straight to 1x.
+            if (m.lastSurvived && !m.speedDrift) {
                 log::info("[fp] {}x verified against the 1x baseline", m.speed);
+                m.speedPhase = false;
+                m.checkingSpeed = false;
+                m.baseline = false;
+                notify(fmt::format("Analyzing at {}x (verified deterministic)", (int)m.speed),
+                    NotificationIcon::Info);
+                startProbing();
+                return;
             }
-            m.baseline = false;
-            startProbing();
+            int lower = std::max(1, static_cast<int>(m.speed) / 2);
+            log::warn("[fp] {}x diverges from 1x ({}) -> retry at {}x",
+                m.speed, m.speedDrift ? "trajectory drift" : "death", lower);
+            m.speed = static_cast<float>(lower);
+            setAnalyzeSpeed(m.speed);
+            m.speedDrift = false;
+            m.anchors.clear(); // captured at the bad speed -> recapture at the new one
+            if (lower <= 1) {
+                // 1x is the ground truth itself; no re-verify needed. Probe at 1x.
+                m.speedPhase = false;
+                m.checkingSpeed = false;
+                m.baseline = false;
+                notify("Speed-up wasn't deterministic; analyzing at 1x",
+                    NotificationIcon::Info);
+                startProbing();
+                return;
+            }
+            // re-verify at the lower speed (baseline/speedPhase/checkingSpeed stay set)
+            if (m.fastMode) { m.capturingAnchors = true; m.nextAnchorCapture = 0; }
+            beginTest();
             return;
         }
         if (!m.lastSurvived) {
@@ -585,6 +610,7 @@ void startAnalysis() {
     m.lastTargetStep = m.inputs[m.targets.back()].step;
     m.testCount = 0;
     m.c240 = m.c120 = m.c60 = 0;
+    m.nAnchored = m.nFull = 0;
     m.speed = std::max(1.f, static_cast<float>(
         Mod::get()->getSettingValue<int64_t>("analyze-speed")));
     m.speedPhase = false;

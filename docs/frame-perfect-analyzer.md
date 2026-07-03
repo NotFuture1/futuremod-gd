@@ -4,9 +4,11 @@
 > record/replay with RNG-seed lock, per-level save files, baseline
 > determinism gate, ±k perturbation probing with early exit (window > 4
 > ticks stops immediately), optional release analysis, and a scheduler
-> time-scale speed-up (default **1x**) that is only kept if a sped-up
-> baseline reproduces the 1x trajectory **tick-for-tick**, else it
-> auto-falls back to 1x. Each probe's horizon **ends at the next recorded
+> time-scale speed-up (default **4x**) that **auto-tunes**: it keeps a
+> speed only if a sped-up baseline reproduces the 1x trajectory
+> **tick-for-tick**, otherwise it halves the speed and re-verifies
+> (8→4→2→1) and uses the fastest that stays exact. Each probe's horizon
+> **ends at the next recorded
 > input** (clamped 24–240 ticks): that measures only this input's own
 > tolerance. An earlier flat 240-tick horizon was wrong — a 1-tick shift
 > compounds across downstream hazards and eventually kills, so every
