@@ -93,7 +93,7 @@ From this folder:
 geode build
 ```
 
-That configures CMake, compiles, packages `swift.futuremod.geode`, and installs
+That configures CMake, compiles, packages `future.futuremod.geode`, and installs
 it into your GD mods folder automatically.
 
 To rebuild after editing `src/main.cpp`, just run `geode build` again.

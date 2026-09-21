@@ -6,9 +6,9 @@
         "android": "2.2081"
     },
     "version": "v1.0.0",
-    "id": "swift.futuremod",
+    "id": "future.futuremod",
     "name": "Future Mod",
-    "developer": "swift",
+    "developer": "future",
     "description": "Skip level endings with a key, plus a per-level macro recorder with an automatic frame-perfect analyzer.",
     "tags": [
         "gameplay",
