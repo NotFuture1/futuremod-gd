@@ -602,7 +602,10 @@ class $modify(GhostPlayLayer, PlayLayer) {
     }
 
     void levelComplete()                               { if (ghost::isSim()) return; PlayLayer::levelComplete(); }
-    void incrementJumps()                              { if (ghost::isSim()) return; PlayLayer::incrementJumps(); }
+    // NOTE: PlayLayer::incrementJumps is `win inline` in the 2.2081 broma and
+    // CANNOT be hooked on Windows (the Mac build compiles it happily, so this
+    // only ever shows up in CI). PlayerObject::incrementJumps is hookable and
+    // is upstream of it, so gating that one suppresses the same chain.
     CheckpointObject* markCheckpoint()                 { if (ghost::isSim()) return nullptr; return PlayLayer::markCheckpoint(); }
     void playEndAnimationToPos(cocos2d::CCPoint p)     { if (ghost::isSim()) return; PlayLayer::playEndAnimationToPos(p); }
 };
