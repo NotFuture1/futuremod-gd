@@ -1,3 +1,5 @@
+#include "common.hpp"
+
 #include <Geode/Geode.hpp>
 #include <Geode/modify/GJBaseGameLayer.hpp>
 #include <Geode/modify/PlayLayer.hpp>
@@ -647,6 +649,12 @@ void startAnalysis() {
 }
 
 } // namespace
+
+// Exposed for the frame-window diagnostics (src/probe.cpp): they must not run
+// while the macro system is driving the player.
+namespace fw {
+bool macroBusy() { return Macro::get().mode != Mode::Idle; }
+} // namespace fw
 
 // ---------------------------------------------------------------------------
 class $modify(MacroBGL, GJBaseGameLayer) {

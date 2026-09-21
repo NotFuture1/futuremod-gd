@@ -5,7 +5,7 @@
         "mac": "2.2081",
         "android": "2.2081"
     },
-    "version": "v1.0.0",
+    "version": "v1.1.0",
     "id": "future.futuremod",
     "name": "Future Mod",
     "developer": "future",
@@ -92,6 +92,44 @@
         "show-60": {
             "name": "Show 60 FPS",
             "description": "Display the frame-perfect count at 60 (window <= 4 ticks).",
+            "type": "bool",
+            "default": false
+        },
+        "fw-title": {
+            "name": "Frame window counter (in development)",
+            "type": "title"
+        },
+        "ghost-fidelity": {
+            "name": "Ghost fidelity probe",
+            "description": "DIAGNOSTIC. Every 120 ticks of normal play, simulate a copy of the player 60 ticks ahead and compare it against what you actually do. Writes [fw] GHOSTFID lines to geode.log and a PHASE1 ... VERDICT=PASS/FAIL line when you die or quit. This decides whether the new frame-window counter can measure sub-frame windows at all. Costs nothing visually; turn it off when you're done testing.",
+            "type": "bool",
+            "default": false
+        },
+        "ghost-order": {
+            "name": "Ghost step order",
+            "description": "Which reconstruction of GD's physics step the simulation uses. GD's real internal ordering can't be read from the game, so this is tested by trial: run the fidelity probe once on each of 0, 1 and 2 and keep whichever gives the smallest maxdx. 0 = collide, move, rotate (what every other trajectory mod uses). 1 = move, collide, rotate. 2 = collide, move, special, rotate.",
+            "type": "int",
+            "default": 0,
+            "min": 0,
+            "max": 2
+        },
+        "ghost-eps": {
+            "name": "Ghost tolerance (units)",
+            "description": "How far the simulated player may drift from the real one before it counts as diverged. Used by the fidelity probe's divergeAt column.",
+            "type": "float",
+            "default": 0.1,
+            "min": 0.001,
+            "max": 5.0
+        },
+        "timestamp-probe": {
+            "name": "Timestamp clock probe",
+            "description": "DIAGNOSTIC. Logs 100 [fw] TSPROBE lines at the start of a level showing the game's internal input timestamp. Answers one question: whether GD's own between-steps input path can be driven at an exact sub-tick time, which would let windows be measured below one frame in the real engine. One run is enough, ever.",
+            "type": "bool",
+            "default": false
+        },
+        "log-verbose": {
+            "name": "Verbose logging",
+            "description": "Write per-tick detail to geode.log. Very noisy; only enable when asked for a detailed log.",
             "type": "bool",
             "default": false
         }
