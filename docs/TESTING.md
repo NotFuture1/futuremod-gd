@@ -1,4 +1,4 @@
-# Testing the frame window counter (v1.2.0)
+# Testing the frame window counter (v1.2.1)
 
 Do the tests in order. Each one tells you what to look for, what counts as a
 pass, and what to send back. Everything the mod reports goes to `geode.log`
@@ -16,10 +16,10 @@ named in that test.
 
 ## Step 0: Install and set up (once)
 
-1. Download `future.futuremod.geode` from the **v1.2.0** GitHub release (or
+1. Download `future.futuremod.geode` from the **v1.2.1** (or newer) GitHub release (or
    from the latest Actions run's `futuremod-geode` artifact).
 2. Put it in GD's `geode/mods` folder, replacing the old one. Start GD.
-3. **Geode → Future Mod** should say **v1.2.0**. Open its settings and check:
+3. **Geode → Future Mod** should say **v1.2.1**. Open its settings and check:
    - Enable Macro Features: **on**
    - Analyze releases too: **on** (the new default)
    - Max window: **10**, Sub-frame precision: **3**
@@ -97,7 +97,7 @@ replays. Your clicks must be ignored: same verdict, same run.
 ...
 [fw] SUMMARY inputs=... timings=... wide=... capped=... timeout=... subframe=... probes=... | <=1:.. <=2:.. ...
 [fw] SUMMARY FP@240=... FP@120=... FP@60=... tightest=...
-[fw] EXPORT dir='...' key=... csvRows=... nandlRows=... fwcRows=...
+[fw] EXPORT dir='...' key=... nandlRows=... fwcRows=...
 ```
 - ✅ **Pass:**
   - `BASELINE OK` with `VERDICT=EXACT`
