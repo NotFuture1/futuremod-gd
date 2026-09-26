@@ -129,6 +129,10 @@ windows. If an obviously easy click shows up as frame-perfect, note its
 
 ✅ Pass = both import. ❌ Tell me the error message.
 
+Pressing **Files** in the pause menu rebuilds that level's export files from
+its saved analysis before opening the folder. So if an export looks wrong
+after a mod update, press **Files**. You don't have to analyze again.
+
 ---
 
 ## Step 5: Run it twice (determinism)

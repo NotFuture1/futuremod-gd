@@ -116,6 +116,10 @@ struct SavedWin {
     int idx;
     double window;
     char status;
+    // detail for the CSV; absent in macros analyzed by v1.2.0 (NaN = unknown)
+    double lo = std::numeric_limits<double>::quiet_NaN();
+    double hi = std::numeric_limits<double>::quiet_NaN();
+    int tap = -1, sub = -1;
 };
 
 // Per-level macro files: macros/<key>.txt under the mod save dir.
@@ -322,7 +326,8 @@ struct Macro {
             out += fmt::format("{} {} {} {} {:.9f} {} {}\n", in.step, in.button, in.player1 ? 1 : 0,
                 in.down ? 1 : 0, in.frac, in.mid ? 1 : 0, in.mask);
         for (auto const& sw : savedWindows)
-            out += fmt::format("W {} {:.4f} {}\n", sw.idx, sw.window, sw.status);
+            out += fmt::format("W {} {:.4f} {} {:.4f} {:.4f} {} {}\n", sw.idx, sw.window, sw.status,
+                sw.lo, sw.hi, sw.tap, sw.sub);
         auto res = file::writeString(path(), out);
         if (!res) log::warn("[macro] save failed: {}", res.unwrapErr());
     }
@@ -361,8 +366,11 @@ struct Macro {
                 std::istringstream sw(line);
                 std::string tag; int idx; double w; std::string st;
                 if (sw >> tag >> idx >> w) {
-                    char s = (sw >> st && !st.empty()) ? st[0] : static_cast<char>(WStatus::Exact);
-                    savedWindows.push_back({ idx, w, s });
+                    SavedWin v{ idx, w, static_cast<char>(WStatus::Exact) };
+                    if (sw >> st && !st.empty()) v.status = st[0];
+                    double lo, hi; int tap, sub;
+                    if (sw >> lo >> hi >> tap >> sub) { v.lo = lo; v.hi = hi; v.tap = tap; v.sub = sub; }
+                    savedWindows.push_back(v);
                 }
             } else {
                 std::istringstream s3(line);
@@ -906,32 +914,43 @@ std::string fmtNum(double v) {
 // .nandl.json has every analyzed input, non-timings as "-" (NaNDL's own
 // "ignored" marker); .fwc.json drops them, because the frame-window-counter
 // mod's importer reads "-" as a 1-frame window.
+// Built from the SAVED analysis, so the files can be regenerated at any time
+// (pause menu > Files) without re-running it.
 void writeExports() {
     auto& m = Macro::get();
+    auto wins = m.savedWindows;
+    std::sort(wins.begin(), wins.end(), [](SavedWin const& a, SavedWin const& b) { return a.idx < b.idx; });
+
     std::string csv = "input,edge,player,step,frac,time_s,window_frames,lo,hi,status,tap,subframe\n";
-    std::string rowsAll, rowsFwc;
-    int nAll = 0, nFwc = 0;
-    for (size_t i = 0; i < m.targets.size(); i++) {
-        auto const& in = m.inputs[m.targets[i]];
-        auto const& r = m.results[i];
-        if (r.status == WStatus::None) continue;
-        csv += fmt::format("{},{},{},{},{:.4f},{:.5f},{:.4f},{:.4f},{:.4f},{},{},{}\n",
-            m.targets[i], in.down ? "press" : "release", in.player1 ? 1 : 2, in.step, in.frac,
-            in.t() / 240.0, r.window, r.lo, r.hi, statusName(r.status), r.tap ? 1 : 0, r.subframe ? 1 : 0);
-        bool wide = r.status == WStatus::Wide;
-        std::string win = wide ? "\"-\"" : fmtNum(r.window);
-        auto row = [&](int n) {
+    std::vector<std::string> rowsAll, rowsFwc;
+    auto opt = [](double v) { return std::isnan(v) ? std::string() : fmt::format("{:.4f}", v); };
+    auto optI = [](int v) { return v < 0 ? std::string() : std::to_string(v); };
+    for (auto const& sw : wins) {
+        if (sw.idx < 0 || sw.idx >= static_cast<int>(m.inputs.size())) continue;
+        auto const& in = m.inputs[sw.idx];
+        auto st = static_cast<WStatus>(sw.status);
+        csv += fmt::format("{},{},{},{},{:.4f},{:.5f},{:.4f},{},{},{},{},{}\n",
+            sw.idx, in.down ? "press" : "release", in.player1 ? 1 : 2, in.step, in.frac,
+            in.t() / 240.0, sw.window, opt(sw.lo), opt(sw.hi), statusName(st), optI(sw.tap), optI(sw.sub));
+        bool wide = st == WStatus::Wide;
+        std::string win = wide ? "\"-\"" : fmtNum(sw.window);
+        auto row = [&](size_t n) {
             return fmt::format("    {{ \"input\": {}, \"timePosition\": {}, \"frameWindow\": {}, \"isPlayer2\": {} }}",
                 n, fmtNum(in.t()), win, in.player1 ? "false" : "true");
         };
-        rowsAll += (nAll ? ",\n" : "") + row(++nAll);
-        if (!wide) rowsFwc += (nFwc ? ",\n" : "") + row(++nFwc);
+        rowsAll.push_back(row(rowsAll.size() + 1));
+        if (!wide) rowsFwc.push_back(row(rowsFwc.size() + 1));
     }
-    auto json = [](std::string const& rows) {
+    auto json = [](std::vector<std::string> const& rows) {
+        std::string joined;
+        for (size_t k = 0; k < rows.size(); k++) {
+            if (k > 0) joined += ",\n";
+            joined += rows[k];
+        }
         return fmt::format(
             "{{\n  \"format\": \"nandl-calculator\",\n  \"version\": 1,\n"
             "  \"settings\": {{ \"gameFps\": 240, \"windowFps\": 240, \"respawnSeconds\": 0, \"timeUnit\": \"frames\" }},\n"
-            "  \"frameWindows\": [\n{}\n  ]\n}}\n", rows);
+            "  \"frameWindows\": [\n{}\n  ]\n}}\n", joined);
     };
     auto dir = macrosDir();
     auto w = [](std::filesystem::path const& p, std::string const& s) {
@@ -939,10 +958,10 @@ void writeExports() {
         if (!res) log::warn("[fw] export failed ({}): {}", p.string(), res.unwrapErr());
     };
     w(dir / (m.curKey + ".windows.csv"), csv);
-    if (nAll) w(dir / (m.curKey + ".nandl.json"), json(rowsAll));
-    if (nFwc) w(dir / (m.curKey + ".fwc.json"), json(rowsFwc));
-    FW_LOG("EXPORT dir='{}' key={} csvRows={} nandlRows={} fwcRows={}",
-        dir.string(), m.curKey, nAll, nAll, nFwc);
+    if (!rowsAll.empty()) w(dir / (m.curKey + ".nandl.json"), json(rowsAll));
+    if (!rowsFwc.empty()) w(dir / (m.curKey + ".fwc.json"), json(rowsFwc));
+    FW_LOG("EXPORT dir='{}' key={} nandlRows={} fwcRows={}",
+        dir.string(), m.curKey, rowsAll.size(), rowsFwc.size());
 }
 
 void finishAnalysis() {
@@ -958,7 +977,9 @@ void finishAnalysis() {
     for (size_t i = 0; i < m.targets.size(); i++) {
         auto const& r = m.results[i];
         if (r.status == WStatus::None) continue;
-        m.savedWindows.push_back({ static_cast<int>(m.targets[i]), r.window, static_cast<char>(r.status) });
+        SavedWin sw{ static_cast<int>(m.targets[i]), r.window, static_cast<char>(r.status) };
+        sw.lo = r.lo; sw.hi = r.hi; sw.tap = r.tap ? 1 : 0; sw.sub = r.subframe ? 1 : 0;
+        m.savedWindows.push_back(sw);
         if (r.status == WStatus::Wide) { nWide++; continue; }
         if (r.status == WStatus::Capped) nCapped++;
         if (r.status == WStatus::Timeout) nTimeout++;
@@ -1805,6 +1826,10 @@ class $modify(MacroPauseLayer, PauseLayer) {
     }
 
     void onFiles(CCObject*) {
+        // refresh this level's exports from its saved analysis first, so the
+        // files are always current (and a fixed exporter needs no re-analysis)
+        auto& m = Macro::get();
+        if (PlayLayer::get() && !m.savedWindows.empty() && m.mode == Mode::Idle) writeExports();
         file::openFolder(macrosDir());
     }
 

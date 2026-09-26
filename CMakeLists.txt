@@ -3,7 +3,7 @@ cmake_minimum_required(VERSION 3.21)
 # Build for both Apple Silicon and Intel on macOS.
 set(CMAKE_OSX_ARCHITECTURES "arm64;x86_64")
 
-project(FutureMod VERSION 1.2.0)
+project(FutureMod VERSION 1.2.1)
 
 # Collect every .cpp under src/
 file(GLOB_RECURSE SOURCES
