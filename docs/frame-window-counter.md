@@ -1,6 +1,7 @@
 # Automated Frame Window Counter — proposal
 
-> **Status:** proposal (2026-09-21). Builds on the existing analyzer in
+> **Status:** v1 implemented (v1.2.0, 2026-09-26), awaiting on-hardware
+> validation. See "What v1.2.0 ships" at the end. Builds on the analyzer in
 > `src/macro.cpp` and the research in `frame-perfect-analyzer.md`.
 
 ## 0. The gap
@@ -124,3 +125,52 @@ Three levers, in order of payoff:
   macro (zBot, Mega Hack, Eclipse) can be analyzed without re-recording.
 - **v4** — calibration harness: run levels NaN has published counts for and diff
   per-input, since a counter nobody can check is worth nothing.
+
+## 7. What v1.2.0 ships (and how it differs from the plan above)
+
+**Measured in the real engine, not a ghost.** Sub-frame measurement was
+planned on the ghost simulation (Phase 1). It isn't needed: Click Between
+Frames' step split is small, public (theyareonit/Click-Between-Frames,
+MIT) and deterministic once its wall-clock input is taken out. So the replay
+reproduces the split itself, and every probe runs in the real engine. The
+ghost probe stays as an optional diagnostic.
+
+- **Recording.** Each input stores `(step, frac, mid, mask)`. `mid` = GD's
+  `handleButton` fired inside player 1's `PlayerObject::update` (CBF calls
+  it between substeps); `frac` = the player-update time already simulated
+  that step divided by the step's total, measured by an innermost
+  (`VeryLate`) update hook and finalized at the next `processCommands`.
+  `mask` = which players GD actually pushed (hooked `pushButton` /
+  `releaseButton`), so dual-mode replays push both icons.
+- **Replay.** Boundary inputs are still applied in `processQueuedButtons`,
+  as before. Mid-step inputs are applied by a `Late`-priority player-update
+  hook that mirrors CBF v1.5.0 line for line: substep factors, not-buffering
+  rule, on-ground fix, slope/dart collision delta, leftover rotation plus
+  `m_lastPosition`, P2 folded into P1's update, and the Windows ship-rotation
+  `Slerp2D` workaround (same address). While the macro drives,
+  `m_queuedButtons` is cleared each frame so CBF never splits a replay step
+  for a stray real click.
+- **Windows.** Integer sweep −1,+1,−2,+2… up to `fw-max-window` (default
+  10), then for `mid` inputs a bisection of each dead edge (`fw-subframe`,
+  default 3 = 1/8 frame). Window = hi − lo, where whole-frame edges sit ±0.5
+  outside the outermost survivor (N surviving frames = window N).
+- **Taps move as one gesture.** A press whose release follows within
+  `maxWindow + 2` frames is shifted together with that release. The plan's
+  "clamp at the adjacent edge" would have capped every short tap's window
+  at its hold length, which inflates the frame-perfect count. Remaining
+  clamps (the neighbouring gesture) are flagged `capped`.
+- **Statuses:** `exact`, `wide` (> max), `capped`, `timeout`. The planned
+  `anchor-fallback` is only logged: a failed anchor falls back to a full
+  replay, and the window stays exact.
+- **Exports** (macros folder): `<level>.windows.csv` (everything),
+  `<level>.nandl.json` (every input; non-timings as NaNDL's `"-"`),
+  `<level>.fwc.json` (timings only, because the frame-window-counter mod
+  reads `"-"` as 1).
+- **Diagnostics:** `[fw] BASELINE ... driftVsRecording=... VERDICT=` compares
+  the analyzer's replay against the recorded run (the recorded track is now
+  saved as `<level>.track`). `[fw] PLAYBACK ... VERDICT=` does the same for K.
+- **Refused:** CBF Physics Bypass (wall-clock step count, so runs aren't
+  reproducible). Warned: GD's own "click between steps" without CBF.
+
+Not done yet: in-mod `L*`, window-coloured markers, gallop/prefilter probing,
+`.gdr` import (v2/v3 above).

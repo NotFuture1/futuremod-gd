@@ -78,9 +78,10 @@ class $modify(ProbePlayLayer, PlayLayer) {
         FW_LOG("ENV probes: fidelity={} timestamp={} verbose={}",
             fidelityEnabled() ? 1 : 0, tsProbeEnabled() ? 1 : 0, fw::verbose() ? 1 : 0);
         if (cbf) {
-            FW_WARN("ENV Click Between Frames is loaded -- it derives step deltas from "
-                    "wall-clock and zeroes clickBetweenSteps/clickOnSteps, so measurement "
-                    "is NOT deterministic while it is on. Disable it before analysing.");
+            // CBF is supported by the macro/analyzer (it reproduces CBF's split
+            // step); only the ghost diagnostics below don't model it.
+            FW_LOG("ENV Click Between Frames is loaded -- supported by record/replay/analyze; "
+                   "the ghost fidelity probe does not model its split steps.");
         }
         return true;
     }

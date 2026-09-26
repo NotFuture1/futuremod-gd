@@ -5,11 +5,11 @@
         "mac": "2.2081",
         "android": "2.2081"
     },
-    "version": "v1.1.0",
+    "version": "v1.2.0",
     "id": "future.futuremod",
     "name": "Future Mod",
     "developer": "future",
-    "description": "Skip level endings with a key, plus a per-level macro recorder with an automatic frame-perfect analyzer.",
+    "description": "Skip level endings with a key, plus a per-level macro recorder with an automatic frame window counter (Click Between Frames supported).",
     "tags": [
         "gameplay",
         "utility"
@@ -23,7 +23,7 @@
             "default": "Space"
         },
         "macro-title": {
-            "name": "Macro (frame-perfect analyzer, Phase 0)",
+            "name": "Macro + frame window counter",
             "type": "title"
         },
         "macro-enabled": {
@@ -34,7 +34,7 @@
         },
         "macro-record": {
             "name": "Macro: Record",
-            "description": "Toggle recording your inputs as a step-indexed macro. Because it indexes by physics step (not time), recording while the game is slowed down by other mods still captures clicks correctly. Recording restarts on death, so it captures the attempt you actually complete.",
+            "description": "Toggle recording your inputs. Works with Click Between Frames: each click's exact position inside the physics step is captured, so the replay and the analysis reproduce what CBF actually did. Recording restarts on death, so it captures the attempt you complete. Don't use CBF's Physics Bypass.",
             "type": "keybind",
             "category": "gameplay",
             "default": "J"
@@ -47,8 +47,8 @@
             "default": "K"
         },
         "macro-analyze": {
-            "name": "Macro: Analyze frame perfects",
-            "description": "Run the frame-perfect analyzer on the recorded macro. It shifts each input +/- a few ticks, re-runs, and measures each input's timing window. Turn OFF noclip and speedhack before running.",
+            "name": "Macro: Analyze frame windows",
+            "description": "Measure every input's frame window: shift it earlier/later, re-run, and find the range that still survives. Results go to geode.log, the HUD, and export files (CSV + NaNDL JSON) in the macros folder (pause menu > Files). Don't touch the keyboard/mouse while it runs. Turn off noclip, speedhack and CBF Physics Bypass.",
             "type": "keybind",
             "category": "gameplay",
             "default": "N"
@@ -63,15 +63,31 @@
         },
         "analyze-releases": {
             "name": "Analyze releases too",
-            "description": "Also measure the timing window of RELEASES (letting go), not just presses. Wave/ship straight-flying is mostly release timing. Roughly doubles the analysis time.",
+            "description": "Also measure the timing window of RELEASES (letting go), not just presses. Wave/ship straight-flying is mostly release timing. Short taps are measured as one gesture either way. Turn off for cube-only levels to halve analysis time.",
             "type": "bool",
-            "default": false
+            "default": true
         },
         "analyze-fast": {
             "name": "Fast analysis (EXPERIMENTAL)",
             "description": "Snapshots the game state before each input and restarts probes from there instead of replaying the whole level every time, so long levels analyze far faster (near-linear instead of quadratic). Every snapshot is first VERIFIED by re-running it unshifted and comparing against the baseline trajectory; any snapshot that drifts is discarded and that input falls back to the normal full-replay method automatically. EXPERIMENTAL: if counts still look wrong, compare with this OFF.",
             "type": "bool",
             "default": false
+        },
+        "fw-max-window": {
+            "name": "Max window (frames)",
+            "description": "Windows wider than this many 240 Hz frames are reported as 'wide' (not a timing) and stop being probed. 10 matches NaN's lists; lower = faster analysis.",
+            "type": "int",
+            "default": 10,
+            "min": 2,
+            "max": 30
+        },
+        "fw-subframe": {
+            "name": "Sub-frame precision (CBF)",
+            "description": "For inputs made with Click Between Frames, bisect each window edge this many times below one frame (3 = 1/8 frame, each step costs one extra run per edge). 0 = whole frames only. Has no effect on non-CBF runs, whose windows are always whole frames.",
+            "type": "int",
+            "default": 3,
+            "min": 0,
+            "max": 6
         },
         "analyze-display-title": {
             "name": "Frame-perfect display rates",
@@ -96,12 +112,12 @@
             "default": false
         },
         "fw-title": {
-            "name": "Frame window counter (in development)",
+            "name": "Diagnostics (optional)",
             "type": "title"
         },
         "ghost-fidelity": {
             "name": "Ghost fidelity probe",
-            "description": "DIAGNOSTIC. Every 120 ticks of normal play, simulate a copy of the player 60 ticks ahead and compare it against what you actually do. Writes [fw] GHOSTFID lines to geode.log and a PHASE1 ... VERDICT=PASS/FAIL line when you die or quit. This decides whether the new frame-window counter can measure sub-frame windows at all. Costs nothing visually; turn it off when you're done testing.",
+            "description": "OPTIONAL DIAGNOSTIC, not needed for the frame window counter. DIAGNOSTIC. Every 120 ticks of normal play, simulate a copy of the player 60 ticks ahead and compare it against what you actually do. Writes [fw] GHOSTFID lines to geode.log and a PHASE1 ... VERDICT=PASS/FAIL line when you die or quit. This decides whether the new frame-window counter can measure sub-frame windows at all. Costs nothing visually; turn it off when you're done testing.",
             "type": "bool",
             "default": false
         },
@@ -123,7 +139,7 @@
         },
         "timestamp-probe": {
             "name": "Timestamp clock probe",
-            "description": "DIAGNOSTIC. Logs 100 [fw] TSPROBE lines at the start of a level showing the game's internal input timestamp. Answers one question: whether GD's own between-steps input path can be driven at an exact sub-tick time, which would let windows be measured below one frame in the real engine. One run is enough, ever.",
+            "description": "OPTIONAL DIAGNOSTIC, not needed for the frame window counter. DIAGNOSTIC. Logs 100 [fw] TSPROBE lines at the start of a level showing the game's internal input timestamp. Answers one question: whether GD's own between-steps input path can be driven at an exact sub-tick time, which would let windows be measured below one frame in the real engine. One run is enough, ever.",
             "type": "bool",
             "default": false
         },

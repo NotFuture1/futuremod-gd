@@ -5,10 +5,12 @@ Two features:
 1. **Skip level endings** — press a key while a level is finishing to
    register the completion and instantly exit the level, skipping the
    suck-into-the-wall animation, the dead-air delay, and the completion panel.
-2. **Macro + frame-perfect analyzer** — record a run as a physics-step macro
-   (J), replay it (K), and analyze it (N): every input is shifted ±ticks and
-   re-simulated to measure its timing window, yielding frame-perfect counts
-   at 240/120/60. See `docs/frame-perfect-analyzer.md` for the design.
+2. **Macro + frame window counter**: record a run as a physics-step macro
+   (J), replay it (K), and analyze it (N). Every input is shifted ±frames
+   (and sub-frame for Click Between Frames clicks) and re-simulated to measure
+   its timing window, exported as CSV + NaNDL JSON. See
+   `docs/frame-window-counter.md` for the design and `docs/TESTING.md` for the
+   on-hardware test procedure.
 
 ## Setting the key
 
