@@ -1,4 +1,4 @@
-# Testing the frame window counter (v1.2.1)
+# Testing the frame window counter (v1.3.0)
 
 Do the tests in order. Each one tells you what to look for, what counts as a
 pass, and what to send back. Everything the mod reports goes to `geode.log`
@@ -132,6 +132,24 @@ windows. If an obviously easy click shows up as frame-perfect, note its
 Pressing **Files** in the pause menu rebuilds that level's export files from
 its saved analysis before opening the folder. So if an export looks wrong
 after a mod update, press **Files**. You don't have to analyze again.
+
+---
+
+## Step 4b: Watch the rings (v1.3.0)
+
+1. After Step 3 finished, press **K** to replay.
+2. On every analyzed click **and** release, a ring should pop up on the
+   player at the moment of the input, with the window number to its left
+   (`1`, `2`, `1/2`…). Red = tight, green = loose, pink = sub-frame (CBF).
+   The ring stays on that spot in the level as the camera moves.
+3. Each ring plays a sound. A 1-frame input is the lowest note, and wider
+   windows are higher.
+4. Top-left: one row per window (`1f:`, `2f:`…) counting up as you pass them,
+   out of the total (`3/12`). Dying or restarting resets it.
+
+✅ Pass = rings line up with the clicks (including mid-air CBF clicks).
+❌ Tell me what's off: rings early/late, wrong spot, drifting, or no sound.
+If there's no sound, try **Sound file** = `playSound_01.ogg` in settings.
 
 ---
 

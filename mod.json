@@ -5,7 +5,7 @@
         "mac": "2.2081",
         "android": "2.2081"
     },
-    "version": "v1.2.1",
+    "version": "v1.3.0",
     "id": "future.futuremod",
     "name": "Future Mod",
     "developer": "future",
@@ -90,26 +90,56 @@
             "max": 6
         },
         "analyze-display-title": {
-            "name": "Frame-perfect display rates",
+            "name": "Analyzer HUD rates",
             "type": "title"
         },
         "show-240": {
             "name": "Show 240 FPS",
-            "description": "Display the frame-perfect count at 240 (window <= 1 tick).",
+            "description": "While analyzing, show the frame-perfect count at 240 (window <= 1 tick) in the top-right corner.",
             "type": "bool",
             "default": true
         },
         "show-120": {
             "name": "Show 120 FPS",
-            "description": "Display the frame-perfect count at 120 (window <= 2 ticks).",
+            "description": "While analyzing, show the frame-perfect count at 120 (window <= 2 ticks) in the top-right corner.",
             "type": "bool",
             "default": false
         },
         "show-60": {
             "name": "Show 60 FPS",
-            "description": "Display the frame-perfect count at 60 (window <= 4 ticks).",
+            "description": "While analyzing, show the frame-perfect count at 60 (window <= 4 ticks) in the top-right corner.",
             "type": "bool",
             "default": false
+        },
+        "fw-display-title": {
+            "name": "Frame window display (playback)",
+            "type": "title"
+        },
+        "fw-rings": {
+            "name": "Frame window rings",
+            "description": "During macro playback (K), draw a ring on the player at every analyzed click and release, the moment it happens, labelled with its frame window and coloured by it (red = tight, green = loose; pink = sub-frame with CBF). A counter in the top-left shows how many inputs of each window you've passed. Same display as NaN GD's frame window videos. Run the analyzer (N) once first so the windows are known.",
+            "type": "bool",
+            "default": true
+        },
+        "fw-sound": {
+            "name": "Frame window sound",
+            "description": "Play a sound on every analyzed input during playback. Its pitch follows the window: a 1-frame input is the lowest note and each extra frame steps it up, so you can hear how tight a section is.",
+            "type": "bool",
+            "default": true
+        },
+        "fw-sound-file": {
+            "name": "Sound file",
+            "description": "A GD sound name (e.g. counter003.ogg, playSound_01.ogg), a file you put in this mod's config folder, or a full path to an .ogg/.mp3/.wav. Falls back to playSound_01.ogg if it can't be found.",
+            "type": "string",
+            "default": "counter003.ogg"
+        },
+        "fw-sound-volume": {
+            "name": "Sound volume",
+            "description": "Volume of the frame window sound (also scaled by GD's SFX volume).",
+            "type": "float",
+            "default": 0.8,
+            "min": 0.0,
+            "max": 1.0
         },
         "fw-title": {
             "name": "Diagnostics (optional)",

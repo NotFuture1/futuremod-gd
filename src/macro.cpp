@@ -1,5 +1,6 @@
 #include "common.hpp"
 #include "sim/ghost.hpp"
+#include "display.hpp"
 
 #include <Geode/Geode.hpp>
 #include <Geode/modify/GJBaseGameLayer.hpp>
@@ -51,10 +52,9 @@ constexpr int kStall   = 24;  // ticks with no movement at all => the player is 
 constexpr int kDeadStall = 4; // ticks with no movement AND m_isDead set => dead (fast path)
 constexpr double kSmallest = std::numeric_limits<float>::min(); // CBF's minimum substep factor
 
-// Frame-perfect ding pitch by tier. The tighter the window, the lower the pitch.
-constexpr float kDing60  = 1.50f; // easiest  -> highest
-constexpr float kDing120 = 1.15f;
-constexpr float kDing240 = 0.85f; // hardest  -> lowest
+// Analyzer ding when it finds a frame-perfect (lower = tighter, like the
+// playback window sounds in display.cpp).
+constexpr float kDing240 = 0.85f;
 
 enum class Mode { Idle, Recording, Playing, Analyzing };
 enum class Phase { Integer, Refine };
@@ -272,13 +272,9 @@ struct Macro {
     bool anchorDrift = false;
     int nAnchored = 0, nFull = 0;
 
-    // analysis results that persist for the live playback tally
+    // analysis results that persist for the playback display
     std::vector<SavedWin> savedWindows;
-    std::vector<int> fp240, fp120, fp60;
-    size_t pi240 = 0, pi120 = 0, pi60 = 0;
-    std::vector<std::pair<int, double>> playWins; // (step, window) of measured timings
-    size_t piWin = 0;
-    double lastPlayWin = -1.0;
+    std::vector<double> winByInput; // per input: its measured window, NaN = no ring
 
     std::string curKey;
 
@@ -300,23 +296,18 @@ struct Macro {
         return deathStep >= effTargetStep() - 2;
     }
 
-    void buildFpLists() {
-        fp240.clear(); fp120.clear(); fp60.clear(); playWins.clear();
+    // which inputs get a ring on playback (wide = not a timing = no ring);
+    // returns the measured windows for the counter's totals
+    std::vector<double> buildRings() {
+        winByInput.assign(inputs.size(), std::numeric_limits<double>::quiet_NaN());
+        std::vector<double> wins;
         for (auto const& sw : savedWindows) {
             if (sw.idx < 0 || sw.idx >= static_cast<int>(inputs.size())) continue;
             if (sw.status == static_cast<char>(WStatus::Wide) || sw.window <= 0.0) continue;
-            int st = inputs[sw.idx].step;
-            if (sw.window <= 1.0 + 1e-9) fp240.push_back(st);
-            if (sw.window <= 2.0 + 1e-9) fp120.push_back(st);
-            if (sw.window <= 4.0 + 1e-9) fp60.push_back(st);
-            playWins.push_back({ st, sw.window });
+            winByInput[sw.idx] = sw.window;
+            wins.push_back(sw.window);
         }
-        std::sort(fp240.begin(), fp240.end());
-        std::sort(fp120.begin(), fp120.end());
-        std::sort(fp60.begin(), fp60.end());
-        std::sort(playWins.begin(), playWins.end());
-        pi240 = pi120 = pi60 = piWin = 0;
-        lastPlayWin = -1.0;
+        return wins;
     }
 
     void save() {
@@ -482,11 +473,8 @@ void updateHud() {
         if (s120) s += fmt::format("FP@120: {}\n", m.c120);
         if (s60)  s += fmt::format("FP@60: {}\n",  m.c60);
         if (m.tightest < 1e8) s += fmt::format("min: {:.2f}f", m.tightest);
-    } else { // playback live tally: passed / total
-        if (s240) s += fmt::format("FP@240: {}/{}\n", m.pi240, m.fp240.size());
-        if (s120) s += fmt::format("FP@120: {}/{}\n", m.pi120, m.fp120.size());
-        if (s60)  s += fmt::format("FP@60: {}/{}\n",  m.pi60,  m.fp60.size());
-        if (m.lastPlayWin > 0.0) s += fmt::format("last: {:.2f}f", m.lastPlayWin);
+    } else {
+        s = " "; // playback has its own display (display.cpp); keep this corner clear
     }
 
     // Look the label up by tag on the CURRENT PlayLayer each time -- never hold
@@ -526,6 +514,21 @@ void applyInput(GJBaseGameLayer* l, InputEdge const& in) {
     int mask = in.mask ? in.mask : (in.player1 ? 1 : 2);
     if (mask & 1) act(l->m_player1);
     if (mask & 2) act(l->m_player2);
+}
+
+// Replay one scheduled input. On playback, an analyzed input also gets its
+// ring + sound right here, the instant it is applied -- for a CBF mid-step
+// input that's inside the split, so the ring sits exactly where the click was.
+void fireInput(GJBaseGameLayer* l, size_t idx) {
+    auto& m = Macro::get();
+    auto const& in = m.inputs[idx];
+    applyInput(l, in);
+    if (m.mode != Mode::Playing || idx >= m.winByInput.size() || std::isnan(m.winByInput[idx])) return;
+    auto pl = PlayLayer::get();
+    if (!pl || static_cast<GJBaseGameLayer*>(pl) != l) return;
+    int mask = in.mask ? in.mask : (in.player1 ? 1 : 2);
+    auto p = (mask & 1) ? pl->m_player1 : pl->m_player2;
+    fw::display::onInput(pl, p ? p : pl->m_player1, m.winByInput[idx]);
 }
 
 // Build the input schedule for a replay. When `shifted`, the analyzer's target
@@ -576,6 +579,7 @@ void startRecording() {
         notify("GD's own 'Click between steps' is on: replays may be off.\n"
                "Use Click Between Frames, or turn that option off.", NotificationIcon::Warning);
     }
+    fw::display::stop(pl); // rings belong to playback
     m.mode = Mode::Recording;
     m.inputs.clear();
     m.cpStep.clear();
@@ -632,16 +636,20 @@ void startPlaying() {
     m.verdictLogged = false;
     m.maxDrift = 0.f;
     m.maxDriftStep = -1;
-    m.buildFpLists(); // live frame-perfect tally from the last analysis
+    auto wins = m.buildRings(); // rings + counter from the last analysis
     logEnv("play", pl);
+    updateHud(); // clears the analyzer's corner text
+    fw::display::start(pl, wins);
+    if (wins.empty() && Mod::get()->getSettingValue<bool>("fw-rings"))
+        notify("No frame windows yet: press your Analyze key first", NotificationIcon::Info);
     pl->resetLevel();
-    if (!m.savedWindows.empty()) updateHud();
     notify(fmt::format("Macro: playing {} inputs", m.inputs.size()), NotificationIcon::Info);
 }
 
 void stopPlaying() {
     logPlaybackVerdict("stopped");
     Macro::get().mode = Mode::Idle;
+    fw::display::stop(PlayLayer::get());
     notify("Macro: playback stopped", NotificationIcon::Info);
 }
 
@@ -1138,6 +1146,7 @@ void startAnalysis() {
                "It makes every run different. (CBF itself is fine.)", NotificationIcon::Error);
         return;
     }
+    fw::display::stop(pl); // rings belong to playback
     bool alsoReleases = Mod::get()->getSettingValue<bool>("analyze-releases");
     m.maxWindow = std::clamp(settingInt("fw-max-window"), 2, 30);
     m.subSteps = std::clamp(settingInt("fw-subframe"), 0, 6);
@@ -1241,7 +1250,7 @@ class $modify(MacroBGL, GJBaseGameLayer) {
                 auto const& ev = m.sched[m.schedPos];
                 if (ev.step > m.step) break;
                 if (ev.mid && ev.step == m.step) break;
-                applyInput(this, m.inputs[ev.idx]);
+                fireInput(this, ev.idx);
                 m.schedPos++;
             }
             if (m.mode == Mode::Playing && !m.finishedNotified
@@ -1282,23 +1291,6 @@ class $modify(MacroBGL, GJBaseGameLayer) {
                 float drift = std::sqrt(dx * dx + dy * dy);
                 if (drift > m.maxDrift) { m.maxDrift = drift; m.maxDriftStep = m.step; }
             }
-            // live frame-perfect tally: count as we pass each FP click, ding only for
-            // the rates the user has selected to display.
-            bool a240 = false, a120 = false, a60 = false, aw = false;
-            while (m.pi240 < m.fp240.size() && m.fp240[m.pi240] <= m.step) { m.pi240++; a240 = true; }
-            while (m.pi120 < m.fp120.size() && m.fp120[m.pi120] <= m.step) { m.pi120++; a120 = true; }
-            while (m.pi60  < m.fp60.size()  && m.fp60[m.pi60]   <= m.step) { m.pi60++;  a60  = true; }
-            while (m.piWin < m.playWins.size() && m.playWins[m.piWin].first <= m.step) {
-                m.lastPlayWin = m.playWins[m.piWin].second; m.piWin++; aw = true;
-            }
-            bool s240 = Mod::get()->getSettingValue<bool>("show-240");
-            bool s120 = Mod::get()->getSettingValue<bool>("show-120");
-            bool s60  = Mod::get()->getSettingValue<bool>("show-60");
-            if (!s240 && !s120 && !s60) s240 = true; // mirror the HUD default
-            bool d240 = s240 && a240, d120 = s120 && a120, d60 = s60 && a60;
-            if (d240 || d120 || d60)
-                playDing(d240 ? kDing240 : d120 ? kDing120 : kDing60);
-            if (a240 || a120 || a60 || aw) updateHud();
         } else if (m.mode == Mode::Analyzing && !m.testResolved) {
             // 1x baseline: record the ground-truth reference track, and compare it
             // to the RECORDED run (does the replay reproduce what you played?)
@@ -1418,6 +1410,9 @@ class $modify(MacroBGL, GJBaseGameLayer) {
             }
         } else {
             GJBaseGameLayer::update(dt);
+            // after the camera moved this frame: keep the rings pinned to the level
+            if (m.mode == Mode::Playing && static_cast<GJBaseGameLayer*>(PlayLayer::get()) == this)
+                fw::display::tick(PlayLayer::get());
         }
     }
 };
@@ -1513,7 +1508,7 @@ class $modify(FwSplitPlayer, PlayerObject) {
         for (size_t k = 0; k < factors.size(); k++) {
             bool endStep = (k + 1 == factors.size());
             // CBF applies each input when the NEXT substep is popped
-            if (k > 0) applyInput(pl, m.inputs[evs[k - 1].first]);
+            if (k > 0) fireInput(pl, evs[k - 1].first);
             const float substepDelta = stepDelta * factors[k];
             g_split.rotationDelta = substepDelta;
 
@@ -1730,8 +1725,7 @@ class $modify(MacroPlayLayer, PlayLayer) {
             m.verdictLogged = false;
             m.maxDrift = 0.f;
             m.maxDriftStep = -1;
-            m.pi240 = m.pi120 = m.pi60 = m.piWin = 0; // restart the live tally
-            m.lastPlayWin = -1.0;
+            fw::display::restart(this); // fresh attempt: clear rings, zero the counter
             if (m.haveSeed) { m_randomSeed = m.seed1; m_replayRandSeed = m.seed2; }
         } else if (m.mode == Mode::Analyzing) {
             if (!m.inBeginTest && !m.testResolved) {
