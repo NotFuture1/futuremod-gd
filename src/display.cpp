@@ -34,6 +34,9 @@ Counts g_counts;
 bool ringsOn() { return Mod::get()->getSettingValue<bool>("fw-rings"); }
 bool soundOn() { return Mod::get()->getSettingValue<bool>("fw-sound"); }
 bool popOn()   { return Mod::get()->getSettingValue<bool>("fw-ring-pop"); }
+float ringSize() {
+    return std::clamp(static_cast<float>(Mod::get()->getSettingValue<double>("fw-ring-size")), 0.1f, 5.f);
+}
 
 // Tight = red, loose = green, on a square-root curve so 1/2/3/4 frames are
 // clearly different colours (that's where the interesting windows live).
@@ -182,12 +185,13 @@ CCNode* ringLayer(PlayLayer* pl, bool create) {
     return n;
 }
 
-// object-layer point -> ring-layer point, and the camera's zoom
-void place(PlayLayer* pl, CCNode* layer, FwRing* r) {
+// object-layer point -> ring-layer point, and the camera's zoom times the
+// user's ring size
+void place(PlayLayer* pl, CCNode* layer, FwRing* r, float size) {
     auto ol = pl->m_objectLayer;
     if (!ol) return;
     r->setPosition(layer->convertToNodeSpace(ol->convertToWorldSpace(r->levelPos)));
-    r->setScale(std::fabs(ol->getScaleY()));
+    r->setScale(std::fabs(ol->getScaleY()) * size);
 }
 
 // ---- counter (top-left) ----------------------------------------------------
@@ -309,7 +313,7 @@ void onInput(PlayLayer* pl, PlayerObject* player, double window) {
     if (!ring) return;
     auto layer = ringLayer(pl, true);
     layer->addChild(ring);
-    place(pl, layer, ring);
+    place(pl, layer, ring, ringSize());
 
     if (auto kids = layer->getChildren(); kids && kids->count() > kMaxRings)
         static_cast<CCNode*>(kids->objectAtIndex(0))->removeFromParent();
@@ -321,9 +325,10 @@ void tick(PlayLayer* pl) {
     if (!layer || !layer->getChildrenCount()) return;
     auto win = CCDirector::sharedDirector()->getWinSize();
     constexpr float margin = 300.f;
+    float size = ringSize();
     std::vector<CCNode*> gone;
     for (auto r : CCArrayExt<FwRing*>(layer->getChildren())) {
-        place(pl, layer, r);
+        place(pl, layer, r, size);
         auto p = layer->convertToWorldSpace(r->getPosition());
         if (p.x < -margin || p.x > win.width + margin || p.y < -margin || p.y > win.height + margin)
             gone.push_back(r);

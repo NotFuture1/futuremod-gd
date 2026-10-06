@@ -5,7 +5,7 @@
         "mac": "2.2081",
         "android": "2.2081"
     },
-    "version": "v1.3.1",
+    "version": "v1.3.2",
     "id": "future.futuremod",
     "name": "Future Mod",
     "developer": "future",
@@ -126,6 +126,14 @@
             "description": "Rings scale up quickly when they appear. Turn off to have them appear instantly at full size.",
             "type": "bool",
             "default": true
+        },
+        "fw-ring-size": {
+            "name": "Ring size",
+            "description": "How big the rings (and their window numbers) are. 1 = normal, 0.5 = half, 2 = double. Changes apply live, even to rings already on screen.",
+            "type": "float",
+            "default": 1.0,
+            "min": 0.25,
+            "max": 3.0
         },
         "fw-sound": {
             "name": "Frame window sound",
