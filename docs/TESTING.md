@@ -1,4 +1,4 @@
-# Testing the frame window counter (v1.3.0)
+# Testing the frame window counter (v1.3.1)
 
 Do the tests in order. Each one tells you what to look for, what counts as a
 pass, and what to send back. Everything the mod reports goes to `geode.log`
@@ -144,8 +144,9 @@ after a mod update, press **Files**. You don't have to analyze again.
    The ring stays on that spot in the level as the camera moves.
 3. Each ring plays a sound. A 1-frame input is the lowest note, and wider
    windows are higher.
-4. Top-left: one row per window (`1f:`, `2f:`…) counting up as you pass them,
-   out of the total (`3/12`). Dying or restarting resets it.
+4. Top-left: one row per window (`1f: 3`, `2f: 5`…) counting up as you pass
+   them. Dying or restarting resets it. (**Ring pop-in animation** off = rings
+   appear instantly at full size.)
 
 ✅ Pass = rings line up with the clicks (including mid-air CBF clicks).
 ❌ Tell me what's off: rings early/late, wrong spot, drifting, or no sound.

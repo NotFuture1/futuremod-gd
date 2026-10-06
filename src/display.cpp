@@ -26,13 +26,14 @@ int bucketOf(double w) {
 }
 
 struct Counts {
-    std::map<int, int> total; // bucket -> measured inputs in the macro
+    std::map<int, int> total; // bucket -> measured inputs in the macro (which rows exist)
     std::map<int, int> hit;   // bucket -> passed this attempt
 };
 Counts g_counts;
 
 bool ringsOn() { return Mod::get()->getSettingValue<bool>("fw-rings"); }
 bool soundOn() { return Mod::get()->getSettingValue<bool>("fw-sound"); }
+bool popOn()   { return Mod::get()->getSettingValue<bool>("fw-ring-pop"); }
 
 // Tight = red, loose = green, on a square-root curve so 1/2/3/4 frames are
 // clearly different colours (that's where the interesting windows live).
@@ -162,8 +163,10 @@ private:
         label->setColor(col);
         body->addChild(label, 1);
 
-        body->setScale(0.6f);
-        body->runAction(CCEaseOut::create(CCScaleTo::create(0.12f, 1.f), 3.f));
+        if (popOn()) {
+            body->setScale(0.6f);
+            body->runAction(CCEaseOut::create(CCScaleTo::create(0.12f, 1.f), 3.f));
+        }
         return true;
     }
 };
@@ -190,16 +193,6 @@ void place(PlayLayer* pl, CCNode* layer, FwRing* r) {
 // ---- counter (top-left) ----------------------------------------------------
 
 constexpr int kRowCountBase = 1000; // child tags: count label = base + bucket
-constexpr int kRowTotalBase = 2000; //             "/total"   = base + bucket
-
-void layoutRow(CCNode* hud, int b) {
-    auto cnt = static_cast<CCLabelBMFont*>(hud->getChildByTag(kRowCountBase + b));
-    auto tot = static_cast<CCLabelBMFont*>(hud->getChildByTag(kRowTotalBase + b));
-    if (!cnt || !tot) return;
-    // measured at rest scale so the pulse doesn't make "/total" jitter
-    float w = cnt->getContentSize().width * kRowScale;
-    tot->setPositionX(cnt->getPositionX() + w + 2.f);
-}
 
 void buildCounter(PlayLayer* pl) {
     if (auto old = pl->getChildByTag(kCounterTag)) old->removeFromParent();
@@ -238,15 +231,6 @@ void buildCounter(PlayLayer* pl) {
         cnt->setPosition({ nameW + 4.f, y - rowH / 2.f });
         hud->addChild(cnt);
 
-        auto tot = CCLabelBMFont::create(fmt::format("/{}", g_counts.total[b]).c_str(), "bigFont.fnt");
-        tot->setTag(kRowTotalBase + b);
-        tot->setAnchorPoint({ 0.f, 0.5f });
-        tot->setScale(0.35f);
-        tot->setColor({ 160, 160, 160 });
-        tot->setOpacity(200);
-        tot->setPosition({ 0.f, y - rowH / 2.f });
-        hud->addChild(tot);
-        layoutRow(hud, b);
 
         y -= kRowStep;
     }
@@ -258,7 +242,6 @@ void bumpCounter(PlayLayer* pl, int b) {
     auto cnt = static_cast<CCLabelBMFont*>(hud->getChildByTag(kRowCountBase + b));
     if (!cnt) return;
     cnt->setString(std::to_string(g_counts.hit[b]).c_str());
-    layoutRow(hud, b);
 
     // quick flash-and-settle: up to white and a bit bigger, then back
     constexpr int kScaleAct = 1001, kTintAct = 1002;
