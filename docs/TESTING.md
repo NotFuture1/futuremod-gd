@@ -1,4 +1,4 @@
-# Testing the frame window counter (v1.4.0)
+# Testing the frame window counter (v1.5.0)
 
 Do the tests in order. Each one tells you what to look for, what counts as a
 pass, and what to send back. Everything the mod reports goes to `geode.log`
@@ -234,5 +234,5 @@ with `[fw]` from Steps 3, 6 and 8.
 | Max window (frames) | 10 | Windows wider than this are "wide" (not a timing). Lower = faster. |
 | Sub-frame precision (CBF) | 3 | 3 = 1/8 frame. 0 = whole frames only. No effect on non-CBF runs. |
 | Analyze releases too | on | Turn off for cube-only levels to halve the time. |
-| Analyzer speed-up | 4 | Auto-drops to a slower speed if the sped-up replay isn't identical. |
-| Fast analysis | off | Turn on once Step 6 passes. |
+| Analyzer speed-up | 16 | Up to 32. Auto-halves if the sped-up replay isn't identical to 1x. |
+| Fast analysis | on | Save-states per input; the done popup shows the % of runs that used them. |

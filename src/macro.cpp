@@ -258,10 +258,19 @@ struct Macro {
     int baseDriftStep = -1;
 
     // --- experimental fast analysis (mid-level save-states) ---
+    // GD's checkpoint restores the player's physics but NOT which buttons are
+    // held, and the resetLevel before the restore releases them all. Without
+    // this every snapshot taken mid-hold (ship climbing, wave up, holding cube)
+    // drifted, failed verification and fell back to a full replay.
+    struct Held {
+        std::vector<std::pair<int, bool>> buttons;
+        bool left = false, right = false;
+    };
     struct Anchor {
         Ref<CheckpointObject> cp;
         uint64_t seed1 = 0, seed2 = 0; // RNG state AT the snapshot, not level start
         int step = 0;                  // step the snapshot was actually taken at
+        Held p1, p2;
     };
     bool fastMode = false;
     bool capturingAnchors = false;
@@ -690,6 +699,22 @@ void computeLimits(Macro& m) {
     }
 }
 
+Macro::Held captureHeld(PlayerObject* p) {
+    Macro::Held h;
+    if (!p) return h;
+    for (auto const& [b, down] : p->m_holdingButtons) h.buttons.push_back({ b, down });
+    h.left = p->m_holdingLeft;
+    h.right = p->m_holdingRight;
+    return h;
+}
+
+void restoreHeld(PlayerObject* p, Macro::Held const& h) {
+    if (!p) return;
+    for (auto const& [b, down] : h.buttons) p->m_holdingButtons[b] = down;
+    p->m_holdingLeft = h.left;
+    p->m_holdingRight = h.right;
+}
+
 // A death ends the current test. Baseline / anchor-verify runs must never die;
 // a probe's death only counts against the tested input if the run reached it.
 void resolveDeath(Macro& m, int deathStep) {
@@ -766,6 +791,8 @@ void beginTest() {
             // from the previous probe's death; the checkpoint then overrides it.
             pl->resetLevel();
             pl->loadFromCheckpoint(a.cp);
+            restoreHeld(pl->m_player1, a.p1);
+            restoreHeld(pl->m_player2, a.p2);
             m.step = a.step;
             m.gameTime = a.step / 240.0;
             // inputs AT the anchor step are already baked into the snapshot
@@ -1039,8 +1066,12 @@ void finishAnalysis() {
     updateHud(); // while still Analyzing, so the HUD shows the final counts
     m.mode = Mode::Idle;
     playDing();
-    notify(fmt::format("Analysis done: {} timings, 240:{} 120:{} 60:{}\nSaved to the macros folder",
-        static_cast<int>(m.targets.size()) - nWide, m.c240, m.c120, m.c60), NotificationIcon::Success);
+    std::string fastInfo;
+    if (m.fastMode && m.nAnchored + m.nFull > 0)
+        fastInfo = fmt::format("\nFast mode: {}% of runs from save-states",
+            100 * m.nAnchored / (m.nAnchored + m.nFull));
+    notify(fmt::format("Analysis done: {} timings, 240:{} 120:{} 60:{}{}\nSaved to the macros folder",
+        static_cast<int>(m.targets.size()) - nWide, m.c240, m.c120, m.c60, fastInfo), NotificationIcon::Success);
 }
 
 void advanceAnalysis(bool survived) {
@@ -1352,9 +1383,17 @@ class $modify(MacroBGL, GJBaseGameLayer) {
                 if (auto plc = PlayLayer::get()) {
                     while (m.nextAnchorCapture < m.targets.size()
                            && m.step >= m.anchorStep[m.nextAnchorCapture]) {
-                        if (auto cp = plc->markCheckpoint())
-                            m.anchors[m.nextAnchorCapture] =
-                                { cp, plc->m_randomSeed, plc->m_replayRandSeed, m.step };
+                        // inputs close together share one snapshot (same step)
+                        auto prev = m.anchors.find(m.nextAnchorCapture - 1);
+                        if (m.nextAnchorCapture > 0 && prev != m.anchors.end()
+                            && prev->second.step == m.step) {
+                            m.anchors[m.nextAnchorCapture] = prev->second;
+                        } else if (auto cp = plc->markCheckpoint()) {
+                            Macro::Anchor a{ cp, plc->m_randomSeed, plc->m_replayRandSeed, m.step };
+                            a.p1 = captureHeld(m_player1);
+                            a.p2 = captureHeld(m_player2);
+                            m.anchors[m.nextAnchorCapture] = a;
+                        }
                         m.nextAnchorCapture++;
                     }
                 }
@@ -1396,15 +1435,19 @@ class $modify(MacroBGL, GJBaseGameLayer) {
             } else if (m.step >= m.marginEnd) {
                 m.testResolved = true;
                 m.lastSurvived = true;
-            } else if (m_player1 && !deadFlag && m_player1->m_isOnGround
+            } else if (m_player1 && !deadFlag
                        && (!m_player2 || !m_player2->isVisible())
                        && m.step > m.probeSettleStep
                        && m.step < static_cast<int>(m.baseTrack.size())) {
-                // early exit: grounded at the baseline's exact x/y/vy after the whole
-                // shifted gesture has fired = the trajectory re-joined the baseline.
+                // early exit: at the baseline's exact x/y/vy after the whole shifted
+                // gesture has fired = the trajectory re-joined the baseline, so the
+                // rest of the probe would replay it exactly. Grounded is the common
+                // case (cube landing); in the air (ship/wave sliding a surface, orbs)
+                // it has to be an essentially exact match.
                 auto const& bt = m.baseTrack[m.step];
-                if (std::fabs(cx - bt.x) < 0.1f && std::fabs(cy - bt.y) < 0.1f
-                    && std::fabs(static_cast<float>(m_player1->m_yVelocity) - bt.vy) < 0.1f) {
+                float tol = m_player1->m_isOnGround ? 0.1f : 0.01f;
+                if (std::fabs(cx - bt.x) < tol && std::fabs(cy - bt.y) < tol
+                    && std::fabs(static_cast<float>(m_player1->m_yVelocity) - bt.vy) < tol) {
                     m.testResolved = true;
                     m.lastSurvived = true;
                 }

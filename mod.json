@@ -5,7 +5,7 @@
         "mac": "2.2081",
         "android": "2.2081"
     },
-    "version": "v1.4.0",
+    "version": "v1.5.0",
     "id": "future.futuremod",
     "name": "Future Mod",
     "developer": "future",
@@ -55,11 +55,11 @@
         },
         "analyze-speed": {
             "name": "Analyzer speed-up",
-            "description": "How fast to run the analysis. The analyzer tries this speed, and if a sped-up baseline doesn't reproduce your real 1x run tick-for-tick it automatically steps down (8x->4x->2x->1x) until it finds the fastest speed that stays exact. So a higher number is safe: it only ever speeds things up when it's provably identical to 1x. Long levels benefit most. For the biggest levels also enable 'Fast analysis'.",
+            "description": "How fast to run the analysis. The analyzer tries this speed, and if a sped-up baseline doesn't reproduce your real 1x run tick-for-tick it automatically halves it (32->16->8->4->2->1) until it finds the fastest speed that stays exact. So a higher number is safe: it only ever speeds things up when it's provably identical to 1x.",
             "type": "int",
-            "default": 4,
+            "default": 16,
             "min": 1,
-            "max": 8
+            "max": 32
         },
         "analyze-releases": {
             "name": "Analyze releases too",
@@ -68,10 +68,10 @@
             "default": true
         },
         "analyze-fast": {
-            "name": "Fast analysis (EXPERIMENTAL)",
-            "description": "Snapshots the game state before each input and restarts probes from there instead of replaying the whole level every time, so long levels analyze far faster (near-linear instead of quadratic). Every snapshot is first VERIFIED by re-running it unshifted and comparing against the baseline trajectory; any snapshot that drifts is discarded and that input falls back to the normal full-replay method automatically. EXPERIMENTAL: if counts still look wrong, compare with this OFF.",
+            "name": "Fast analysis",
+            "description": "Snapshots the game before each input and starts that input's test runs from there, instead of replaying the whole level every time. Analysis time then grows with the NUMBER of inputs, not with how far into the level they are, so long levels are far faster. Every snapshot is first verified by re-running it unshifted against the baseline; one that drifts is discarded and that input falls back to a full replay automatically. The 'Analysis done' popup shows how many runs used snapshots.",
             "type": "bool",
-            "default": false
+            "default": true
         },
         "fw-max-window": {
             "name": "Max window (frames)",
