@@ -295,6 +295,10 @@ struct Macro {
     size_t farPos = 0;
     bool cbfMacro = false; // CBF run: every input can land mid-frame -> sub-frame windows
     std::chrono::steady_clock::time_point startedAt, probingAt;
+    // timing breakdown for the done popup
+    long framesProbing = 0; // rendered frames spent in the probing phase
+    int verifyFails = 0;    // anchors discarded by their check run
+    int multiOffAt = -1;    // input index where back-to-back runs were switched off
     bool capturingAnchors = false;
     size_t nextAnchorCapture = 0;
     std::vector<int> anchorStep;
@@ -1201,13 +1205,19 @@ void finishAnalysis() {
     updateHud(); // while still Analyzing, so the HUD shows the final counts
     m.mode = Mode::Idle;
     playDing();
-    double secs = std::chrono::duration<double>(std::chrono::steady_clock::now() - m.startedAt).count();
-    FW_LOG("SUMMARY time={:.1f}s runs={} speed={}x multiPerFrame={} anchored={} full={}",
-        secs, m.testCount, m.speed, m.multiOK ? 1 : 0, m.nAnchored, m.nFull);
-    std::string fastInfo = fmt::format("\n{:.0f}s, {} runs at {}x", secs, m.testCount, (int)m.speed);
-    if (m.fastMode && m.nAnchored + m.nFull > 0)
-        fastInfo += fmt::format(", {}% from save-states",
-            100 * m.nAnchored / (m.nAnchored + m.nFull));
+    auto now = std::chrono::steady_clock::now();
+    double secs = std::chrono::duration<double>(now - m.startedAt).count();
+    double refSecs = std::chrono::duration<double>(m.probingAt - m.startedAt).count();
+    double probeSecs = secs - refSecs;
+    double perFrame = m.framesProbing > 0 ? static_cast<double>(m.testCount) / m.framesProbing : 0.0;
+    int pct = (m.nAnchored + m.nFull) > 0 ? 100 * m.nAnchored / (m.nAnchored + m.nFull) : 0;
+    FW_LOG("SUMMARY time={:.1f}s reference={:.1f}s tests={:.1f}s runs={} frames={} runsPerFrame={:.2f} "
+           "speed={}x fast={} anchored={} full={} verifyFails={} multiPerFrame={} multiOffAt={} subSteps={} cbf={}",
+        secs, refSecs, probeSecs, m.testCount, m.framesProbing, perFrame, m.speed, m.fastMode ? 1 : 0,
+        m.nAnchored, m.nFull, m.verifyFails, m.multiOK ? 1 : 0, m.multiOffAt, m.subSteps, m.cbfMacro ? 1 : 0);
+    std::string fastInfo = fmt::format("\n{:.0f}s (ref {:.0f}s), {} runs, {:.1f}/frame, {}x, {}% save-states{}",
+        secs, refSecs, m.testCount, perFrame, (int)m.speed, m.fastMode ? pct : 0,
+        m.multiOK ? "" : ", multi OFF");
     notify(fmt::format("Analysis done: {} timings, 240:{} 120:{} 60:{}{}\nSaved to the macros folder",
         static_cast<int>(m.targets.size()) - nWide, m.c240, m.c120, m.c60, fastInfo), NotificationIcon::Success);
 }
@@ -1334,6 +1344,7 @@ void onTestResolved() {
         if ((m.anchorDrift || !m.lastSurvived) && m.testInline && m.multiOK) {
             // started mid-frame: re-check it the normal way before blaming the anchor
             m.multiOK = false;
+            m.multiOffAt = static_cast<int>(m.targetIdx);
             FW_WARN("multi-run per frame disagreed on anchor #{} -> off, re-verifying normally",
                 m.targets[m.targetIdx]);
             m.verifyingAnchor = true;
@@ -1344,6 +1355,7 @@ void onTestResolved() {
             log::warn("[fw] anchor for input #{} failed verification ({}) -> full replay",
                 m.targets[m.targetIdx], m.anchorDrift ? "drift" : "death");
             m.anchors.erase(m.targetIdx);
+            m.verifyFails++;
         }
         continueTarget();
         return;
@@ -1407,6 +1419,9 @@ void startAnalysis() {
     m.tapMode = false;
     m.multiOK = true;
     m.testInline = false;
+    m.framesProbing = 0;
+    m.verifyFails = 0;
+    m.multiOffAt = -1;
     m.startedAt = std::chrono::steady_clock::now();
     m.baseline = true;       // first run is the unshifted determinism check
     m.targetIdx = 0;
@@ -1647,10 +1662,21 @@ class $modify(MacroBGL, GJBaseGameLayer) {
                     m.lastSurvived = !m.baseline && !m.verifyingAnchor;
                     if (!m.baseline && !m.verifyingAnchor) m.hadTimeout = true;
                 }
-                if (!m.testResolved) break; // still running: carry on next frame
+                auto ms = std::chrono::duration<double, std::milli>(
+                    std::chrono::steady_clock::now() - t0).count();
+                if (!m.testResolved) {
+                    // A save-state run that needs more steps than one update gives
+                    // keeps going inside this frame too (verified the same way),
+                    // so a run never costs several frames at a low speed-up/FPS.
+                    bool cont = m.mode == Mode::Analyzing && !m.baseline && m.multiOK
+                        && m.restoredRun && ms < kFrameBudgetMs && runs < 2000;
+                    if (!cont) break; // carry on next frame
+                    m.testInline = true;
+                    continue;
+                }
                 m.testResolved = false;
                 onTestResolved();
-                auto ms = std::chrono::duration<double, std::milli>(
+                ms = std::chrono::duration<double, std::milli>(
                     std::chrono::steady_clock::now() - t0).count();
                 // only save-state runs: their anchor check proves this works; a
                 // full replay restarted mid-frame has nothing checking it
@@ -1659,7 +1685,10 @@ class $modify(MacroBGL, GJBaseGameLayer) {
                 m.testInline = more;
                 if (!more) break;
             }
-            if (m.mode == Mode::Analyzing) updateHud(); // live progress + ETA
+            if (m.mode == Mode::Analyzing) {
+                if (!m.baseline) m.framesProbing++;
+                updateHud(); // live progress + ETA
+            }
         } else {
             GJBaseGameLayer::update(dt);
             // after the camera moved this frame: keep the rings pinned to the level
