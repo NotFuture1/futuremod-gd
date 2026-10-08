@@ -302,6 +302,7 @@ struct Macro {
     int multiOffAt = -1;    // input index where back-to-back runs were switched off
     // where a test run's time goes (ms totals over the probing phase)
     double perfReset = 0, perfLoad = 0, perfSim = 0, perfDeath = 0;
+    int anchorMissing = 0, anchorTooLate = 0; // why a run didn't use a save-state
     long perfRuns = 0;
     bool capturingAnchors = false;
     size_t nextAnchorCapture = 0;
@@ -820,6 +821,16 @@ int correctingStep(Macro& m, size_t after) {
     return -1;
 }
 
+// Can this input's test runs start from its save-state? Counts the reasons
+// when not, for the SUMMARY line.
+bool anchorUsable(Macro& m, int tstep) {
+    auto it = m.anchors.find(m.targetIdx);
+    if (it == m.anchors.end() || !it->second.cp) { m.anchorMissing++; return false; }
+    // even the widest negative shift must land after the snapshot
+    if (it->second.step > tstep - m.maxWindow - 2) { m.anchorTooLate++; return false; }
+    return true;
+}
+
 // A death ends the current test. Baseline / anchor-verify runs must never die;
 // a probe's death only counts against the tested input if the run reached it.
 void resolveDeath(Macro& m, int deathStep) {
@@ -902,10 +913,12 @@ void beginTest() {
     // replaying from the level start. Guarded so any missing/removed/suspect
     // anchor silently falls back to the normal full-replay path.
     if (probing && m.fastMode && pl) {
+        // NOT required: being in GD's checkpoint list. A full replay's
+        // resetLevelFromStart() clears that list, so the first input too early
+        // for a save-state used to disqualify every later one (fast mode never
+        // actually ran). Our Ref keeps the checkpoint alive regardless.
         auto it = m.anchors.find(m.targetIdx);
-        if (it != m.anchors.end() && it->second.cp
-            && it->second.step <= tstep - m.maxWindow - 2 // even the widest -shift lands after it
-            && pl->m_checkpointArray && pl->m_checkpointArray->containsObject(it->second.cp)) {
+        if (anchorUsable(m, tstep)) {
             auto const& a = it->second;
             // resetLevel FIRST: it cancels any auto-respawn GD still has pending
             // from the previous probe's death; the checkpoint then overrides it.
@@ -1110,7 +1123,13 @@ void nextTargets() {
         m.farState = 0;
         computeLimits(m);
         // fast mode: verify this input's anchor first
-        m.verifyingAnchor = m.fastMode && m.anchors.count(m.targetIdx) > 0;
+        // (only one that can actually be used: verifying an unusable one just
+        // cost a full replay that "passed" and hid the problem)
+        {
+            int ms = m.anchorMissing, mt = m.anchorTooLate;
+            m.verifyingAnchor = m.fastMode && anchorUsable(m, m.target().step);
+            m.anchorMissing = ms; m.anchorTooLate = mt; // counted per run in beginTest
+        }
         if (m.verifyingAnchor) { beginTest(); return; }
         if (stepTarget()) return;
         finalizeTarget();
@@ -1238,7 +1257,8 @@ void finishAnalysis() {
            "speed={}x fast={} anchored={} full={} verifyFails={} multiPerFrame={} multiOffAt={} subSteps={} cbf={}",
         secs, refSecs, probeSecs, m.testCount, m.framesProbing, perFrame, m.speed, m.fastMode ? 1 : 0,
         m.nAnchored, m.nFull, m.verifyFails, m.multiOK ? 1 : 0, m.multiOffAt, m.subSteps, m.cbfMacro ? 1 : 0);
-    FW_LOG("SUMMARY PERF {}", perfLine(m));
+    FW_LOG("SUMMARY PERF {} | no save-state: missing={} tooEarlyInLevel={}", perfLine(m),
+        m.anchorMissing, m.anchorTooLate);
     std::string fastInfo = fmt::format("\n{:.0f}s (ref {:.0f}s), {} runs, {:.1f}/frame, {}x, {}% save-states{}",
         secs, refSecs, m.testCount, perFrame, (int)m.speed, m.fastMode ? pct : 0,
         m.multiOK ? "" : ", multi OFF");
@@ -1448,6 +1468,7 @@ void startAnalysis() {
     m.framesProbing = 0;
     m.perfReset = m.perfLoad = m.perfSim = m.perfDeath = 0;
     m.perfRuns = 0;
+    m.anchorMissing = m.anchorTooLate = 0;
     m.verifyFails = 0;
     m.multiOffAt = -1;
     m.startedAt = std::chrono::steady_clock::now();
