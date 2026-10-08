@@ -1108,7 +1108,7 @@ void finishAnalysis() {
     auto hist = fw::nandl::histogram(m.measuredWindows());
     FW_LOG("SUMMARY NaNDL-format [{}] rule={}", fw::nandl::fmtHist(hist),
         Mod::get()->getSettingValue<bool>("fw-classic-horizon") ? "classic" : "correcting-input");
-    if (auto pl = PlayLayer::get(); pl && pl->m_level)
+    if (auto pl = PlayLayer::get(); pl && pl->m_level && Mod::get()->getSettingValue<bool>("nandl-compare"))
         fw::nandl::compare(std::string(pl->m_level->m_levelName), hist, true);
 
     m.save(); // persist windows so the live playback tally survives restarts
