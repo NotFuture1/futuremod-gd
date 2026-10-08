@@ -18,6 +18,7 @@
 #include <cctype>
 #include <cmath>
 #include <limits>
+#include <chrono>
 
 using namespace geode::prelude;
 
@@ -48,6 +49,7 @@ constexpr int kMargin     = 48;  // ticks past the last input the BASELINE / anc
 constexpr int kMinHorizon = 24; // classic rule only
 constexpr int kGrace      = 2;  // ticks after the correcting input to register a death
 constexpr int kMaxHorizon = 240;
+constexpr double kFrameBudgetMs = 28.0; // analysis work per rendered frame (~35 fps on screen)
 constexpr int kFF      = 1;   // 1 = no fast-forward (FF corrupts physics -> false deaths)
 constexpr int kCap     = 60000; // probe cap per analysis
 constexpr int kStall   = 24;  // ticks with no movement at all => the player is dead (fallback)
@@ -278,6 +280,17 @@ struct Macro {
         Held p1, p2;
     };
     bool fastMode = false;
+    // Several test runs per rendered frame (restore + run back to back inside
+    // one update). Verified like everything else: if an anchor check run that
+    // way disagrees with the same check run the normal way, it's switched off.
+    bool multiOK = true;
+    bool testInline = false; // the current test was started mid-frame
+    bool restoredRun = false; // the current test starts from a save-state (verifiable)
+    // Wide shortcut: after -1 and +1 survive, probe far out on both sides; if
+    // both survive the window is wider than the max, without walking there.
+    int farState = 0; // 0 = not tried, 1 = testing -farA, 2 = testing +farB, 3 = done
+    int farA = 0, farB = 0;
+    std::chrono::steady_clock::time_point startedAt;
     bool capturingAnchors = false;
     size_t nextAnchorCapture = 0;
     std::vector<int> anchorStep;
@@ -856,6 +869,7 @@ void beginTest() {
         }
     }
     if (probing && !m.verifyingAnchor && !restored) m.nFull++;
+    m.restoredRun = restored;
     if (!restored && pl) {
         // resetLevelFromStart() ALWAYS restarts at the level start -- unlike
         // resetLevel(), which in practice mode respawns at the last checkpoint.
@@ -873,6 +887,21 @@ void beginTest() {
 
 // next whole-frame probe, expanding the narrower open side: -1, +1, -2, +2, ...
 bool pickNextInteger(Macro& m) {
+    // wide shortcut (see farState): only once -1 and +1 both survived
+    if (m.farState == 0 && m.minSurv <= -1 && m.maxSurv >= 1
+        && !m.negDead && !m.negCapped && !m.posDead && !m.posCapped) {
+        m.farA = (m.maxWindow + 1) / 2;
+        m.farB = m.maxWindow - m.farA; // farA + farB + 1 > maxWindow
+        if (m.farB > m.maxSurv && -m.farA >= m.negLimit - 1e-9 && m.farB <= m.posLimit + 1e-9)
+            m.farState = 1;
+        else
+            m.farState = 3;
+    }
+    if (m.farState == 1 || m.farState == 2) {
+        m.phase = Phase::Integer;
+        m.offset = m.farState == 1 ? -m.farA : m.farB;
+        return true;
+    }
     for (;;) {
         int w = m.maxSurv - m.minSurv + 1;
         if (w > m.maxWindow) return false; // wide: not a timing, stop spending probes
@@ -996,6 +1025,7 @@ void nextTargets() {
         m.loRefined = m.hiRefined = false;
         m.phase = Phase::Integer;
         m.offset = 0.0;
+        m.farState = 0;
         computeLimits(m);
         // fast mode: verify this input's anchor first
         m.verifyingAnchor = m.fastMode && m.anchors.count(m.targetIdx) > 0;
@@ -1116,9 +1146,12 @@ void finishAnalysis() {
     updateHud(); // while still Analyzing, so the HUD shows the final counts
     m.mode = Mode::Idle;
     playDing();
-    std::string fastInfo;
+    double secs = std::chrono::duration<double>(std::chrono::steady_clock::now() - m.startedAt).count();
+    FW_LOG("SUMMARY time={:.1f}s runs={} speed={}x multiPerFrame={} anchored={} full={}",
+        secs, m.testCount, m.speed, m.multiOK ? 1 : 0, m.nAnchored, m.nFull);
+    std::string fastInfo = fmt::format("\n{:.0f}s, {} runs at {}x", secs, m.testCount, (int)m.speed);
     if (m.fastMode && m.nAnchored + m.nFull > 0)
-        fastInfo = fmt::format("\nFast mode: {}% of runs from save-states",
+        fastInfo += fmt::format(", {}% from save-states",
             100 * m.nAnchored / (m.nAnchored + m.nFull));
     notify(fmt::format("Analysis done: {} timings, 240:{} 120:{} 60:{}{}\nSaved to the macros folder",
         static_cast<int>(m.targets.size()) - nWide, m.c240, m.c120, m.c60, fastInfo), NotificationIcon::Success);
@@ -1130,6 +1163,15 @@ void advanceAnalysis(bool survived) {
         log::warn("[fw] hit probe cap");
         for (size_t i = m.targetIdx; i < m.targets.size(); i++) m.results[i].status = WStatus::None;
         finishAnalysis();
+        return;
+    }
+    if (m.phase == Phase::Integer && (m.farState == 1 || m.farState == 2)) {
+        // far probe: both surviving = wide (assumes the survivors in between,
+        // like the linear walk would have found); any death = walk normally
+        if (!survived) m.farState = 3;
+        else if (m.farState == 1) m.farState = 2;
+        else { m.minSurv = -m.farA; m.maxSurv = m.farB; m.farState = 3; }
+        continueTarget();
         return;
     }
     if (m.phase == Phase::Integer) {
@@ -1233,6 +1275,15 @@ void onTestResolved() {
     if (m.verifyingAnchor) {
         // offset-0 re-run from the anchor: it must retrace the baseline exactly.
         m.verifyingAnchor = false;
+        if ((m.anchorDrift || !m.lastSurvived) && m.testInline && m.multiOK) {
+            // started mid-frame: re-check it the normal way before blaming the anchor
+            m.multiOK = false;
+            FW_WARN("multi-run per frame disagreed on anchor #{} -> off, re-verifying normally",
+                m.targets[m.targetIdx]);
+            m.verifyingAnchor = true;
+            beginTest();
+            return;
+        }
         if (m.anchorDrift || !m.lastSurvived) {
             log::warn("[fw] anchor for input #{} failed verification ({}) -> full replay",
                 m.targets[m.targetIdx], m.anchorDrift ? "drift" : "death");
@@ -1297,6 +1348,9 @@ void startAnalysis() {
     m.verifyingAnchor = false;
     m.anchorDrift = false;
     m.tapMode = false;
+    m.multiOK = true;
+    m.testInline = false;
+    m.startedAt = std::chrono::steady_clock::now();
     m.baseline = true;       // first run is the unshifted determinism check
     m.targetIdx = 0;
     m.mode = Mode::Analyzing;
@@ -1378,6 +1432,8 @@ class $modify(MacroBGL, GJBaseGameLayer) {
 
     void processCommands(float dt, bool isHalfTick, bool isLastTick) {
         auto& m = Macro::get();
+        // the test is decided: don't burn the rest of this update's steps on it
+        if (m.mode == Mode::Analyzing && m.testResolved && !fw::ghost::isSim()) return;
         if (!fw::ghost::isSim()) {
             g_pcSerial++;
             if (m.mode == Mode::Recording) finalizePending(m);
@@ -1520,19 +1576,31 @@ class $modify(MacroBGL, GJBaseGameLayer) {
             m_queuedButtons.clear();
 
         if (m.mode == Mode::Analyzing) {
-            for (int i = 0; i < kFF && !m.testResolved; i++)
-                GJBaseGameLayer::update(dt);
-            // hang guard: a test that never resolves (stuck/desync) is treated
-            // as "survived" so it can't fabricate a frame-perfect, then we move on.
-            if (!m.testResolved && ++m.testFrames > 2400) {
-                log::warn("[fw] test timeout (target {}, offset {:.3f})", m.targetIdx, m.offset);
-                m.testResolved = true;
-                m.lastSurvived = !m.baseline && !m.verifyingAnchor;
-                if (!m.baseline && !m.verifyingAnchor) m.hadTimeout = true;
-            }
-            if (m.testResolved) {
+            // Run tests back to back inside this frame until the time budget is
+            // used (one test per frame made every run cost >= 1 rendered frame).
+            auto t0 = std::chrono::steady_clock::now();
+            for (int runs = 0;; runs++) {
+                for (int i = 0; i < kFF && !m.testResolved; i++)
+                    GJBaseGameLayer::update(dt);
+                // hang guard: a test that never resolves (stuck/desync) is treated
+                // as "survived" so it can't fabricate a frame-perfect, then we move on.
+                if (!m.testResolved && ++m.testFrames > 2400) {
+                    log::warn("[fw] test timeout (target {}, offset {:.3f})", m.targetIdx, m.offset);
+                    m.testResolved = true;
+                    m.lastSurvived = !m.baseline && !m.verifyingAnchor;
+                    if (!m.baseline && !m.verifyingAnchor) m.hadTimeout = true;
+                }
+                if (!m.testResolved) break; // still running: carry on next frame
                 m.testResolved = false;
                 onTestResolved();
+                auto ms = std::chrono::duration<double, std::milli>(
+                    std::chrono::steady_clock::now() - t0).count();
+                // only save-state runs: their anchor check proves this works; a
+                // full replay restarted mid-frame has nothing checking it
+                bool more = m.mode == Mode::Analyzing && !m.baseline && m.multiOK
+                    && m.restoredRun && !m.testResolved && ms < kFrameBudgetMs && runs < 400;
+                m.testInline = more;
+                if (!more) break;
             }
         } else {
             GJBaseGameLayer::update(dt);
