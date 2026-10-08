@@ -1,6 +1,7 @@
 #include "common.hpp"
 #include "sim/ghost.hpp"
 #include "display.hpp"
+#include "nandl.hpp"
 
 #include <Geode/Geode.hpp>
 #include <Geode/modify/GJBaseGameLayer.hpp>
@@ -44,7 +45,8 @@ constexpr int kMargin     = 48;  // ticks past the last input the BASELINE / anc
 // compounds across many downstream hazards and *eventually* kills, so every
 // window collapsed to 1. Clamped so we still clear an immediate hazard (min)
 // and cap a pathological gap with no inputs (max).
-constexpr int kMinHorizon = 24;
+constexpr int kMinHorizon = 24; // classic rule only
+constexpr int kGrace      = 2;  // ticks after the correcting input to register a death
 constexpr int kMaxHorizon = 240;
 constexpr int kFF      = 1;   // 1 = no fast-forward (FF corrupts physics -> false deaths)
 constexpr int kCap     = 60000; // probe cap per analysis
@@ -249,7 +251,10 @@ struct Macro {
 
     // the 1x baseline player track -- the GROUND TRUTH. Used to verify any speed-up
     // reproduces 1x tick-for-tick, to validate anchors, and for the probe early-exit.
-    struct BasePt { float x, y, vy; };
+    // rel: bit0/bit1 = player 1/2 is in a mode where RELEASING steers
+    // (ship, wave, robot), recorded so the probe horizon knows whether a
+    // later release could have corrected a shifted input.
+    struct BasePt { float x, y, vy; uint8_t rel = 0; };
     std::vector<BasePt> baseTrack;
     bool trackBase = false;    // recording baseTrack (only during the 1x baseline)
     bool checkingSpeed = false; // comparing a sped-up baseline against baseTrack
@@ -307,6 +312,14 @@ struct Macro {
 
     // which inputs get a ring on playback (wide = not a timing = no ring);
     // returns the measured windows for the counter's totals
+    // every measured (non-wide) window, for the NaNDL histogram
+    std::vector<double> measuredWindows() const {
+        std::vector<double> w;
+        for (auto const& sw : savedWindows)
+            if (sw.status != static_cast<char>(WStatus::Wide) && sw.window > 0.0) w.push_back(sw.window);
+        return w;
+    }
+
     std::vector<double> buildRings() {
         winByInput.assign(inputs.size(), std::numeric_limits<double>::quiet_NaN());
         std::vector<double> wins;
@@ -715,6 +728,23 @@ void restoreHeld(PlayerObject* p, Macro::Held const& h) {
     p->m_holdingRight = h.right;
 }
 
+// Step of the first input after `after` that could steer the tested input's
+// player(s) again: any press, or a release while in ship/wave/robot (where
+// letting go changes the path). -1 = none.
+int correctingStep(Macro& m, size_t after) {
+    auto maskOf = [](InputEdge const& in) { return in.mask ? in.mask : (in.player1 ? 1 : 2); };
+    int tmask = maskOf(m.target());
+    for (size_t j = after + 1; j < m.inputs.size(); j++) {
+        auto const& in = m.inputs[j];
+        int mk = maskOf(in) & tmask;
+        if (!mk) continue;
+        if (in.down) return in.step;
+        if (in.step < 0 || in.step >= static_cast<int>(m.baseTrack.size())) return in.step;
+        if (m.baseTrack[in.step].rel & mk) return in.step;
+    }
+    return -1;
+}
+
 // A death ends the current test. Baseline / anchor-verify runs must never die;
 // a probe's death only counts against the tested input if the run reached it.
 void resolveDeath(Macro& m, int deathStep) {
@@ -753,11 +783,26 @@ void beginTest() {
         // the window probes use.
         size_t ti = m.targets[m.targetIdx];
         size_t after = m.tapMode ? static_cast<size_t>(m.pairIdx) : ti;
-        int nextStep = (after + 1 < m.inputs.size()) ? m.inputs[after + 1].step
-                                                     : tstep + kMaxHorizon;
-        m.marginEnd = tstep + std::clamp(nextStep - tstep, kMinHorizon, kMaxHorizon);
         int shifted = static_cast<int>(std::floor(m.target().t() + m.offset + 1e-9));
-        m.marginEnd = std::max(m.marginEnd, shifted + kMinHorizon);
+        if (Mod::get()->getSettingValue<bool>("fw-classic-horizon")) {
+            // v1.5 rule: until the next input of any kind, at least 24 ticks
+            int nextStep = (after + 1 < m.inputs.size()) ? m.inputs[after + 1].step
+                                                         : tstep + kMaxHorizon;
+            m.marginEnd = tstep + std::clamp(nextStep - tstep, kMinHorizon, kMaxHorizon);
+            m.marginEnd = std::max(m.marginEnd, shifted + kMinHorizon);
+        } else {
+            // A shifted input is judged until the next input that could have
+            // CORRECTED it (+ a tick or two to register): a death before then
+            // is this input's fault, one after it is the next input's. The old
+            // flat 24-tick minimum reached past several later clicks in spam
+            // (ship/wave never re-join the path, so the shift's offset killed
+            // there) -> too tight; and ending at ANY next input stopped a cube
+            // jump at its own mid-air release, before the landing -> too wide.
+            int cs = correctingStep(m, after);
+            int end = cs >= 0 ? cs + kGrace : tstep + kMaxHorizon;
+            m.marginEnd = std::min(end, tstep + kMaxHorizon);
+            m.marginEnd = std::max(m.marginEnd, shifted + kGrace);
+        }
         // Never judge a probe past where the 1x baseline was verified alive. For
         // the LAST input the "next input" horizon used to run 240 ticks past the
         // end of the macro, where even the unshifted run dies (no more inputs,
@@ -1060,6 +1105,11 @@ void finishAnalysis() {
         m.c240, m.c120, m.c60, m.tightest < 1e8 ? m.tightest : -1.0);
     if (m.fastMode)
         FW_LOG("fast mode: {} probes from a save-state, {} full replays", m.nAnchored, m.nFull);
+    auto hist = fw::nandl::histogram(m.measuredWindows());
+    FW_LOG("SUMMARY NaNDL-format [{}] rule={}", fw::nandl::fmtHist(hist),
+        Mod::get()->getSettingValue<bool>("fw-classic-horizon") ? "classic" : "correcting-input");
+    if (auto pl = PlayLayer::get(); pl && pl->m_level)
+        fw::nandl::compare(std::string(pl->m_level->m_levelName), hist, true);
 
     m.save(); // persist windows so the live playback tally survives restarts
     writeExports();
@@ -1358,8 +1408,12 @@ class $modify(MacroBGL, GJBaseGameLayer) {
                 auto pos = m_player1->getPosition();
                 if (static_cast<int>(m.baseTrack.size()) <= m.step)
                     m.baseTrack.resize(m.step + 1, { 0.f, 0.f, 0.f });
+                auto relMode = [](PlayerObject* p) {
+                    return p && (p->m_isShip || p->m_isDart || p->m_isRobot);
+                };
+                uint8_t rel = (relMode(m_player1) ? 1 : 0) | (relMode(m_player2) ? 2 : 0);
                 m.baseTrack[m.step] = { pos.x, pos.y,
-                    static_cast<float>(m_player1->m_yVelocity) };
+                    static_cast<float>(m_player1->m_yVelocity), rel };
                 if (m.step >= 0 && m.step < static_cast<int>(m.track.size())) {
                     auto rec = m.track[m.step];
                     float dx = pos.x - rec.first, dy = pos.y - rec.second;
@@ -1908,9 +1962,12 @@ class $modify(MacroPauseLayer, PauseLayer) {
         auto spr2 = ButtonSprite::create("Files");
         spr2->setScale(0.6f);
         menu->addChild(CCMenuItemSpriteExtra::create(spr2, this, menu_selector(MacroPauseLayer::onFiles)));
+        auto spr3 = ButtonSprite::create("NaNDL");
+        spr3->setScale(0.6f);
+        menu->addChild(CCMenuItemSpriteExtra::create(spr3, this, menu_selector(MacroPauseLayer::onNandl)));
         menu->alignItemsHorizontallyWithPadding(6.f);
         auto win = CCDirector::sharedDirector()->getWinSize();
-        menu->setPosition(90.f, win.height - 22.f); // top-left corner of the pause screen
+        menu->setPosition(120.f, win.height - 22.f); // top-left corner of the pause screen
         menu->setZOrder(100);
         this->addChild(menu);
     }
@@ -1921,6 +1978,20 @@ class $modify(MacroPauseLayer, PauseLayer) {
         auto& m = Macro::get();
         if (PlayLayer::get() && !m.savedWindows.empty() && m.mode == Mode::Idle) writeExports();
         file::openFolder(macrosDir());
+    }
+
+    // compare this level's saved analysis with NaN's published frame windows
+    void onNandl(CCObject*) {
+        auto pl = PlayLayer::get();
+        auto& m = Macro::get();
+        if (!pl || !pl->m_level) return;
+        auto w = m.measuredWindows();
+        if (w.empty()) {
+            createQuickPopup("NaNDL", "Analyze this level first (your <cy>Analyze</c> key).",
+                "OK", nullptr, [](auto, bool) {});
+            return;
+        }
+        fw::nandl::compare(std::string(pl->m_level->m_levelName), fw::nandl::histogram(w), false);
     }
 
     void onMacros(CCObject*) {

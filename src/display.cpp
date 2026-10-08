@@ -1,5 +1,6 @@
 #include "display.hpp"
 #include "common.hpp"
+#include "nandl.hpp"
 
 #include <algorithm>
 #include <cmath>
@@ -19,10 +20,11 @@ constexpr float kRowScale   = 0.5f;
 constexpr float kRowPeak    = 0.6f;
 constexpr float kRowStep    = 18.f;
 
-// Counter rows are "within N frames": a window of 2.375 counts as 3f, and
-// anything at or under one frame (including sub-frame CBF windows) as 1f.
+// Counter rows use NaNDL's columns: the number of whole 240 Hz frames the
+// window mostly covers (2.375 -> 2f, 2.75 -> 3f, sub-frame 0.375 -> 0f), so
+// the totals line up with NaN's tables.
 int bucketOf(double w) {
-    return std::max(1, static_cast<int>(std::ceil(w - 1e-9)));
+    return fw::nandl::nearestBin(w);
 }
 
 struct Counts {

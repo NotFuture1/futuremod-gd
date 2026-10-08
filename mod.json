@@ -5,7 +5,7 @@
         "mac": "2.2081",
         "android": "2.2081"
     },
-    "version": "v1.5.0",
+    "version": "v1.6.0",
     "id": "future.futuremod",
     "name": "Future Mod",
     "developer": "future",
@@ -88,6 +88,18 @@
             "default": 3,
             "min": 0,
             "max": 6
+        },
+        "fw-classic-horizon": {
+            "name": "Classic survival rule (A/B)",
+            "description": "OFF (default): a shifted input is judged until the next input that could have corrected it (any press, or a release in ship/wave/robot). ON: the v1.5 rule (until the next input of any kind, at least 24 frames), which came out too tight vs NaN on spam. Only for comparing the two with the NaNDL button.",
+            "type": "bool",
+            "default": false
+        },
+        "nandl-name": {
+            "name": "NaNDL level name",
+            "description": "The level's name on nandl.pages.dev, if it differs from its name in GD. Leave blank to use the GD name. Used by the NaNDL comparison after an analysis and by the pause menu NaNDL button.",
+            "type": "string",
+            "default": ""
         },
         "analyze-display-title": {
             "name": "Analyzer HUD rates",

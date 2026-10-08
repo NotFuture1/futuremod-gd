@@ -1,4 +1,4 @@
-# Testing the frame window counter (v1.5.0)
+# Testing the frame window counter (v1.6.0)
 
 Do the tests in order. Each one tells you what to look for, what counts as a
 pass, and what to send back. Everything the mod reports goes to `geode.log`
@@ -151,6 +151,19 @@ after a mod update, press **Files**. You don't have to analyze again.
 ✅ Pass = rings line up with the clicks (including mid-air CBF clicks).
 ❌ Tell me what's off: rings early/late, wrong spot, drifting, or no sound.
 If there's no sound, try **Sound file** = `playSound_01.ogg` in settings.
+
+---
+
+## Step 4c: Compare with NaN (v1.6.0, VSC)
+
+1. Analyze VSC (N). When it finishes, a **NaNDL comparison** popup opens by
+   itself: for 0..10 frames it shows NaN's count, yours, and the difference,
+   plus both average windows and "tighter / looser / close match".
+2. Pause menu > **NaNDL** shows it again any time without re-analyzing.
+3. If it says the level isn't listed, set **NaNDL level name** in settings to
+   the name on nandl.pages.dev.
+4. A/B: turn **Classic survival rule (A/B)** on, analyze again, compare. Tell
+   me both averages (or send geode.log: the `[fw] NANDL` lines have it all).
 
 ---
 
