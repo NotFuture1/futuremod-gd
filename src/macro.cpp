@@ -8,6 +8,7 @@
 #include <Geode/modify/PlayLayer.hpp>
 #include <Geode/modify/PlayerObject.hpp>
 #include <Geode/modify/PauseLayer.hpp>
+#include <Geode/modify/FMODAudioEngine.hpp>
 #include <Geode/loader/SettingV3.hpp>
 #include <Geode/ui/Popup.hpp>
 #include <unordered_map>
@@ -299,6 +300,9 @@ struct Macro {
     long framesProbing = 0; // rendered frames spent in the probing phase
     int verifyFails = 0;    // anchors discarded by their check run
     int multiOffAt = -1;    // input index where back-to-back runs were switched off
+    // where a test run's time goes (ms totals over the probing phase)
+    double perfReset = 0, perfLoad = 0, perfSim = 0, perfDeath = 0;
+    long perfRuns = 0;
     bool capturingAnchors = false;
     size_t nextAnchorCapture = 0;
     std::vector<int> anchorStep;
@@ -773,6 +777,16 @@ void computeLimits(Macro& m) {
     }
 }
 
+double msSince(std::chrono::steady_clock::time_point t) {
+    return std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t).count();
+}
+
+std::string perfLine(Macro const& m) {
+    double n = m.perfRuns > 0 ? static_cast<double>(m.perfRuns) : 1.0;
+    return fmt::format("per run: reset {:.1f}ms, load {:.1f}ms, sim {:.1f}ms (deaths {:.1f}ms)",
+        m.perfReset / n, m.perfLoad / n, m.perfSim / n, m.perfDeath / n);
+}
+
 Macro::Held captureHeld(PlayerObject* p) {
     Macro::Held h;
     if (!p) return h;
@@ -895,8 +909,12 @@ void beginTest() {
             auto const& a = it->second;
             // resetLevel FIRST: it cancels any auto-respawn GD still has pending
             // from the previous probe's death; the checkpoint then overrides it.
+            auto tr = std::chrono::steady_clock::now();
             pl->resetLevel();
+            auto tl = std::chrono::steady_clock::now();
+            m.perfReset += std::chrono::duration<double, std::milli>(tl - tr).count();
             pl->loadFromCheckpoint(a.cp);
+            m.perfLoad += msSince(tl);
             restoreHeld(pl->m_player1, a.p1);
             restoreHeld(pl->m_player2, a.p2);
             m.step = a.step;
@@ -917,11 +935,14 @@ void beginTest() {
         }
     }
     if (probing && !m.verifyingAnchor && !restored) m.nFull++;
+    if (probing) m.perfRuns++;
     m.restoredRun = restored;
     if (!restored && pl) {
         // resetLevelFromStart() ALWAYS restarts at the level start -- unlike
         // resetLevel(), which in practice mode respawns at the last checkpoint.
+        auto tr = std::chrono::steady_clock::now();
         pl->resetLevelFromStart();
+        if (probing) m.perfReset += msSince(tr);
         m.step = 0;
         m.gameTime = 0;
         m.schedPos = 0;
@@ -1058,6 +1079,8 @@ void finalizeTarget() {
         r.window, r.lo, r.hi, statusName(r.status), r.tap ? 1 : 0, r.subframe ? 1 : 0);
 
     m.targetIdx++;
+    if (m.targetIdx % 25 == 0)
+        FW_LOG("PERF inputs={}/{} runs={} {}", m.targetIdx, m.targets.size(), m.perfRuns, perfLine(m));
     updateHud();
 }
 
@@ -1215,9 +1238,11 @@ void finishAnalysis() {
            "speed={}x fast={} anchored={} full={} verifyFails={} multiPerFrame={} multiOffAt={} subSteps={} cbf={}",
         secs, refSecs, probeSecs, m.testCount, m.framesProbing, perFrame, m.speed, m.fastMode ? 1 : 0,
         m.nAnchored, m.nFull, m.verifyFails, m.multiOK ? 1 : 0, m.multiOffAt, m.subSteps, m.cbfMacro ? 1 : 0);
+    FW_LOG("SUMMARY PERF {}", perfLine(m));
     std::string fastInfo = fmt::format("\n{:.0f}s (ref {:.0f}s), {} runs, {:.1f}/frame, {}x, {}% save-states{}",
         secs, refSecs, m.testCount, perFrame, (int)m.speed, m.fastMode ? pct : 0,
         m.multiOK ? "" : ", multi OFF");
+    fastInfo += "\n" + perfLine(m);
     notify(fmt::format("Analysis done: {} timings, 240:{} 120:{} 60:{}{}\nSaved to the macros folder",
         static_cast<int>(m.targets.size()) - nWide, m.c240, m.c120, m.c60, fastInfo), NotificationIcon::Success);
 }
@@ -1376,6 +1401,7 @@ void startAnalysis() {
         return;
     }
     fw::display::stop(pl); // rings belong to playback
+    if (auto fae = FMODAudioEngine::sharedEngine()) fae->stopAllMusic(true); // analysis is silent
     bool alsoReleases = Mod::get()->getSettingValue<bool>("analyze-releases");
     m.maxWindow = std::clamp(settingInt("fw-max-window"), 2, 30);
     m.subSteps = std::clamp(settingInt("fw-subframe"), 0, 6);
@@ -1420,6 +1446,8 @@ void startAnalysis() {
     m.multiOK = true;
     m.testInline = false;
     m.framesProbing = 0;
+    m.perfReset = m.perfLoad = m.perfSim = m.perfDeath = 0;
+    m.perfRuns = 0;
     m.verifyFails = 0;
     m.multiOffAt = -1;
     m.startedAt = std::chrono::steady_clock::now();
@@ -1652,8 +1680,10 @@ class $modify(MacroBGL, GJBaseGameLayer) {
             // used (one test per frame made every run cost >= 1 rendered frame).
             auto t0 = std::chrono::steady_clock::now();
             for (int runs = 0;; runs++) {
+                auto ts = std::chrono::steady_clock::now();
                 for (int i = 0; i < kFF && !m.testResolved; i++)
                     GJBaseGameLayer::update(dt);
+                if (!m.baseline) m.perfSim += msSince(ts);
                 // hang guard: a test that never resolves (stuck/desync) is treated
                 // as "survived" so it can't fabricate a frame-perfect, then we move on.
                 if (!m.testResolved && ++m.testFrames > 2400) {
@@ -2055,7 +2085,10 @@ class $modify(MacroPlayLayer, PlayLayer) {
     }
 
     void destroyPlayer(PlayerObject* p, GameObject* o) {
+        auto td = std::chrono::steady_clock::now();
         PlayLayer::destroyPlayer(p, o);
+        if (Macro::get().mode == Mode::Analyzing && !Macro::get().baseline)
+            Macro::get().perfDeath += msSince(td);
         // destroyPlayer can fire WITHOUT killing (it's called every frame against
         // some objects), so only trust it when the player is actually dead now.
         // This ends the probe on the death tick instead of waiting out GD's
@@ -2099,6 +2132,41 @@ class $modify(MacroPlayLayer, PlayLayer) {
         PlayLayer::levelComplete();
         // a completed run is the run you wanted: save it without needing J
         if (wasRecording && m.mode == Mode::Recording) stopRecording();
+    }
+};
+
+class $modify(FwQuietPlayer, PlayerObject) {
+    void playDeathEffect() {
+        if (Macro::get().mode == Mode::Analyzing) return;
+        PlayerObject::playDeathEffect();
+    }
+};
+
+// Analysis is silent and skips the death explosion: none of it affects
+// physics, and restarting/seeking the song on every one of thousands of
+// resets was a big part of each test run's cost. Skipped at the audio-engine
+// level only, so GD's own level-start flow (music "prepared" etc.) is intact.
+class $modify(FwQuietAudio, FMODAudioEngine) {
+    void playMusic(gd::string path, bool shouldLoop, float fadeInTime, int channel) {
+        if (Macro::get().mode == Mode::Analyzing) return;
+        FMODAudioEngine::playMusic(path, shouldLoop, fadeInTime, channel);
+    }
+    // the checkpoint's saved song position: saving/restoring it seeks the song
+    void saveAudioState(FMODAudioState& st) {
+        if (Macro::get().mode == Mode::Analyzing) return;
+        FMODAudioEngine::saveAudioState(st);
+    }
+    void loadAudioState(FMODAudioState& st) {
+        if (Macro::get().mode == Mode::Analyzing) return;
+        FMODAudioEngine::loadAudioState(st);
+    }
+    void setMusicTimeMS(unsigned int time, bool dontWait, int musicID) {
+        if (Macro::get().mode == Mode::Analyzing) return;
+        FMODAudioEngine::setMusicTimeMS(time, dontWait, musicID);
+    }
+    void loadAndPlayMusic(gd::string path, unsigned int time, int musicID) {
+        if (Macro::get().mode == Mode::Analyzing) return;
+        FMODAudioEngine::loadAndPlayMusic(path, time, musicID);
     }
 };
 
