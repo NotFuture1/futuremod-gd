@@ -690,6 +690,25 @@ void computeLimits(Macro& m) {
     }
 }
 
+// A death ends the current test. Baseline / anchor-verify runs must never die;
+// a probe's death only counts against the tested input if the run reached it.
+void resolveDeath(Macro& m, int deathStep) {
+    if (m.testResolved) return;
+    m.deathStep = deathStep;
+    m.testResolved = true;
+    if (m.baseline || m.verifyingAnchor) m.lastSurvived = false;
+    else m.lastSurvived = !m.deathCountsAgainstTarget();
+}
+
+// The level's ending started: the run got through everything, so it survived.
+// (The end animation used to read as "stopped moving" = a death, which made
+// the LAST input of every completed macro look absurdly tight.)
+void resolveLevelEnd(Macro& m) {
+    if (m.testResolved) return;
+    m.testResolved = true;
+    m.lastSurvived = true;
+}
+
 void beginTest() {
     auto& m = Macro::get();
     m.testResolved = false;
@@ -714,6 +733,12 @@ void beginTest() {
         m.marginEnd = tstep + std::clamp(nextStep - tstep, kMinHorizon, kMaxHorizon);
         int shifted = static_cast<int>(std::floor(m.target().t() + m.offset + 1e-9));
         m.marginEnd = std::max(m.marginEnd, shifted + kMinHorizon);
+        // Never judge a probe past where the 1x baseline was verified alive. For
+        // the LAST input the "next input" horizon used to run 240 ticks past the
+        // end of the macro, where even the unshifted run dies (no more inputs,
+        // or the end animation) -- so every last input came out ~1 frame.
+        if (!m.baseTrack.empty())
+            m.marginEnd = std::min(m.marginEnd, static_cast<int>(m.baseTrack.size()) - 1);
         int lastOrig = m.tapMode ? m.inputs[m.pairIdx].step : tstep;
         m.probeSettleStep = std::max(lastOrig, static_cast<int>(
             std::floor(m.inputs[m.tapMode ? m.pairIdx : ti].t() + std::max(0.0, m.offset)))) + 2;
@@ -723,6 +748,10 @@ void beginTest() {
     auto pl = PlayLayer::get();
     bool restored = false;
     m.inBeginTest = true; // our resets are not death signals (see resetLevel hook)
+    // A death is now caught the instant it happens, so GD's own respawn (a
+    // delayed action it queues on death) is still pending. Cancel it, or it
+    // would fire in the middle of the next probe and fake a death there.
+    if (pl) pl->stopAllActions();
 
     // Fast mode: restore the snapshot taken just before this input instead of
     // replaying from the level start. Guarded so any missing/removed/suspect
@@ -1730,11 +1759,8 @@ class $modify(MacroPlayLayer, PlayLayer) {
         } else if (m.mode == Mode::Analyzing) {
             if (!m.inBeginTest && !m.testResolved) {
                 // GD reset the level on its own (the post-death auto-restart):
-                // an authoritative death signal.
-                m.deathStep = m.lastProgressStep;
-                m.testResolved = true;
-                if (m.baseline || m.verifyingAnchor) m.lastSurvived = false;
-                else m.lastSurvived = !m.deathCountsAgainstTarget();
+                // an authoritative death signal (fallback; destroyPlayer is first).
+                resolveDeath(m, m.lastProgressStep);
                 log::debug("[fw] external reset -> death @ step {} (target {}, offset {:.3f})",
                     m.deathStep, m.targetIdx, m.offset);
             }
@@ -1777,16 +1803,43 @@ class $modify(MacroPlayLayer, PlayLayer) {
     }
 
     void destroyPlayer(PlayerObject* p, GameObject* o) {
-        // intentionally does nothing special: death is detected by loss of
-        // movement in processCommands, since destroyPlayer can fire without killing.
         PlayLayer::destroyPlayer(p, o);
+        // destroyPlayer can fire WITHOUT killing (it's called every frame against
+        // some objects), so only trust it when the player is actually dead now.
+        // This ends the probe on the death tick instead of waiting out GD's
+        // explosion + respawn delay -- GD freezes physics on death, so the
+        // movement detector never saw it and every death cost a full respawn.
+        auto& m = Macro::get();
+        if (m.mode == Mode::Analyzing && !m.inBeginTest && p && p->m_isDead)
+            resolveDeath(m, std::max(0, m.step - 1));
+    }
+
+    void playEndAnimationToPos(CCPoint pos) {
+        auto& m = Macro::get();
+        if (m.mode == Mode::Analyzing) {
+            resolveLevelEnd(m); // reached the end = survived; skip the ending itself
+            return;
+        }
+        PlayLayer::playEndAnimationToPos(pos);
+    }
+
+    void delayedResetLevel() {
+        // GD's post-death respawn. The analyzer restarts runs itself, but a
+        // respawn for a death the check above missed is still a death. One left
+        // over from an earlier probe finds the player alive and is ignored.
+        auto& m = Macro::get();
+        if (m.mode == Mode::Analyzing) {
+            if (!m.inBeginTest && m_player1 && m_player1->m_isDead)
+                resolveDeath(m, m.lastProgressStep);
+            return;
+        }
+        PlayLayer::delayedResetLevel();
     }
 
     void levelComplete() {
         auto& m = Macro::get();
         if (m.mode == Mode::Analyzing) {
-            m.testResolved = true;
-            m.lastSurvived = true;
+            resolveLevelEnd(m);
             return; // don't actually end the level mid-analysis
         }
         if (m.mode == Mode::Playing) logPlaybackVerdict("complete");
