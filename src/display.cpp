@@ -20,11 +20,20 @@ constexpr float kRowScale   = 0.5f;
 constexpr float kRowPeak    = 0.6f;
 constexpr float kRowStep    = 18.f;
 
-// Counter rows use NaNDL's columns: the number of whole 240 Hz frames the
-// window mostly covers (2.375 -> 2f, 2.75 -> 3f, sub-frame 0.375 -> 0f), so
-// the totals line up with NaN's tables.
+// CBF macros have continuous windows, shown like NaN's counter: ranges of one
+// frame ("2-3" holds 2.00..2.99). Whole-frame macros keep "Nf" rows.
+bool g_ranges = false;
+
 int bucketOf(double w) {
+    if (g_ranges) return std::max(0, static_cast<int>(std::floor(w + 1e-9)));
     return fw::nandl::nearestBin(w);
+}
+
+// colour of a counter row (the middle of its range)
+double rowWindow(int b) { return g_ranges ? b + 0.5 : b; }
+
+std::string rowLabel(int b) {
+    return g_ranges ? fmt::format("{}-{}:", b, b + 1) : fmt::format("{}f:", b);
 }
 
 struct Counts {
@@ -63,20 +72,13 @@ ccColor3B windowColor(double w) {
     return { to8(r + m), to8(g + m), to8(b + m) };
 }
 
-// 1, 2, 1/2, 2 3/8 -- sub-frame bisection gives dyadic windows, which read
-// better as the fractions NaN writes than as decimals.
+// 3, 2.5, 3.62 -- decimals like NaN's rings (CBF windows are continuous)
 std::string fmtWindow(double w) {
     double r = std::round(w);
-    if (std::fabs(w - r) < 1e-6) return std::to_string(static_cast<int>(r));
-    for (int den : { 2, 4, 8, 16, 32, 64 }) {
-        double n = w * den;
-        if (std::fabs(n - std::round(n)) < 1e-6) {
-            int ni = static_cast<int>(std::round(n));
-            int whole = ni / den, rem = ni % den;
-            return whole ? fmt::format("{} {}/{}", whole, rem, den) : fmt::format("{}/{}", rem, den);
-        }
-    }
-    return fmt::format("{:.2f}", w);
+    if (std::fabs(w - r) < 0.005) return std::to_string(static_cast<int>(r));
+    auto t = fmt::format("{:.2f}", w);
+    while (t.back() == '0') t.pop_back();
+    return t;
 }
 
 // ---- sound -----------------------------------------------------------------
@@ -215,10 +217,10 @@ void buildCounter(PlayLayer* pl) {
     std::vector<std::pair<int, CCLabelBMFont*>> names;
     float nameW = 0.f;
     for (auto const& [b, _] : g_counts.total) {
-        auto l = CCLabelBMFont::create(fmt::format("{}f:", b).c_str(), "bigFont.fnt");
+        auto l = CCLabelBMFont::create(rowLabel(b).c_str(), "bigFont.fnt");
         l->setAnchorPoint({ 0.f, 1.f });
         l->setScale(kRowScale);
-        l->setColor(windowColor(b));
+        l->setColor(windowColor(rowWindow(b)));
         nameW = std::max(nameW, l->getScaledContentSize().width);
         names.push_back({ b, l });
     }
@@ -232,7 +234,7 @@ void buildCounter(PlayLayer* pl) {
         // centre-left anchor so the pulse grows in place instead of downward
         cnt->setAnchorPoint({ 0.f, 0.5f });
         cnt->setScale(kRowScale);
-        cnt->setColor(windowColor(b));
+        cnt->setColor(windowColor(rowWindow(b)));
         float rowH = name->getScaledContentSize().height;
         cnt->setPosition({ nameW + 4.f, y - rowH / 2.f });
         hud->addChild(cnt);
@@ -253,7 +255,7 @@ void bumpCounter(PlayLayer* pl, int b) {
     constexpr int kScaleAct = 1001, kTintAct = 1002;
     cnt->stopActionByTag(kScaleAct);
     cnt->stopActionByTag(kTintAct);
-    auto col = windowColor(b);
+    auto col = windowColor(rowWindow(b));
     auto sc = CCSequence::create(
         CCEaseOut::create(CCScaleTo::create(0.06f, kRowPeak), 2.f),
         CCEaseOut::create(CCScaleTo::create(0.20f, kRowScale), 2.f), nullptr);
@@ -276,6 +278,8 @@ namespace fw::display {
 
 void start(PlayLayer* pl, std::vector<double> const& windows) {
     g_counts = Counts{};
+    g_ranges = std::any_of(windows.begin(), windows.end(),
+        [](double w) { return std::fabs(w - std::round(w)) > 1e-6; });
     for (double w : windows) g_counts.total[bucketOf(w)]++;
     for (auto const& [b, _] : g_counts.total) g_counts.hit[b] = 0;
     if (!pl) return;

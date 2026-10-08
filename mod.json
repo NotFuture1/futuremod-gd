@@ -5,7 +5,7 @@
         "mac": "2.2081",
         "android": "2.2081"
     },
-    "version": "v1.7.0",
+    "version": "v1.8.0",
     "id": "future.futuremod",
     "name": "Future Mod",
     "developer": "future",
@@ -83,11 +83,17 @@
         },
         "fw-subframe": {
             "name": "Sub-frame precision (CBF)",
-            "description": "For inputs made with Click Between Frames, bisect each window edge this many times below one frame (3 = 1/8 frame, each step costs one extra run per edge). 0 = whole frames only. Has no effect on non-CBF runs, whose windows are always whole frames.",
+            "description": "On CBF runs, every input's window is measured below one frame (as NaN does): each edge is narrowed this many times. 5 = edges to 1/64 frame (about two decimals, NaN measures to 0.01), 3 = 1/16, 0 = whole frames only. Each step costs two extra runs per input. Has no effect on runs recorded without CBF.",
             "type": "int",
-            "default": 3,
+            "default": 5,
             "min": 0,
-            "max": 6
+            "max": 7
+        },
+        "fw-wide-shortcut": {
+            "name": "Wide shortcut",
+            "description": "When an input survives being shifted 1 frame both ways, test far out on both sides (and halfway back) first: if all survive, it's wider than the max window and isn't a timing, found in about 6 runs instead of 11. It could only be wrong if a 1-frame death pocket hides between the checked frames. Turn off to walk every single frame (exact, slower).",
+            "type": "bool",
+            "default": true
         },
         "fw-classic-horizon": {
             "name": "Classic survival rule (A/B)",

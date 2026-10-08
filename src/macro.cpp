@@ -286,11 +286,15 @@ struct Macro {
     bool multiOK = true;
     bool testInline = false; // the current test was started mid-frame
     bool restoredRun = false; // the current test starts from a save-state (verifiable)
-    // Wide shortcut: after -1 and +1 survive, probe far out on both sides; if
-    // both survive the window is wider than the max, without walking there.
-    int farState = 0; // 0 = not tried, 1 = testing -farA, 2 = testing +farB, 3 = done
+    // Wide shortcut: after -1 and +1 survive, probe far out on both sides and
+    // halfway back; if all survive the window is wider than the max, without
+    // walking every frame there. Any death = walk normally (exact).
+    int farState = 0; // 0 = not tried, 1 = testing farList, 3 = done
     int farA = 0, farB = 0;
-    std::chrono::steady_clock::time_point startedAt;
+    std::vector<int> farList;
+    size_t farPos = 0;
+    bool cbfMacro = false; // CBF run: every input can land mid-frame -> sub-frame windows
+    std::chrono::steady_clock::time_point startedAt, probingAt;
     bool capturingAnchors = false;
     size_t nextAnchorCapture = 0;
     std::vector<int> anchorStep;
@@ -502,8 +506,24 @@ void updateHud() {
     if (!s240 && !s120 && !s60) s240 = true;
 
     std::string s;
+    float progress = -1.f; // 0..1 while analyzing, <0 = no bar
     if (m.mode == Mode::Analyzing) {
-        s += fmt::format("FW {}/{}\n", std::min(m.targetIdx, m.targets.size()), m.targets.size());
+        size_t n = m.targets.size(), done = std::min(m.targetIdx, n);
+        if (m.baseline) {
+            // reference run (1x, real time) or a sped-up re-check of it
+            s += m.speedPhase ? fmt::format("Checking {}x\n", (int)m.speed) : std::string("Reference run (1x)\n");
+            if (m.marginEnd > 0)
+                progress = std::clamp(static_cast<float>(m.step) / m.marginEnd, 0.f, 1.f);
+        } else {
+            s += fmt::format("Input {}/{}", done, n);
+            double el = std::chrono::duration<double>(std::chrono::steady_clock::now() - m.probingAt).count();
+            if (done >= 3 && done < n) {
+                int eta = static_cast<int>(el / done * (n - done) + 0.5);
+                s += fmt::format("  ~{}:{:02}", eta / 60, eta % 60);
+            }
+            s += "\n";
+            progress = n ? static_cast<float>(done) / n : 0.f;
+        }
         if (s240) s += fmt::format("FP@240: {}\n", m.c240);
         if (s120) s += fmt::format("FP@120: {}\n", m.c120);
         if (s60)  s += fmt::format("FP@60: {}\n",  m.c60);
@@ -528,6 +548,30 @@ void updateHud() {
         pl->addChild(hud);
     }
     hud->setString(s.c_str());
+
+    // progress bar under the text
+    constexpr int kBarTag = 0x4D504242; // 'MPBB'
+    constexpr float kBarW = 110.f, kBarH = 5.f;
+    auto bar = pl->getChildByTag(kBarTag);
+    if (progress < 0.f) {
+        if (bar) bar->removeFromParent();
+        return;
+    }
+    if (!bar) {
+        bar = CCNode::create();
+        bar->setTag(kBarTag);
+        auto bg = CCLayerColor::create({ 0, 0, 0, 150 }, kBarW, kBarH);
+        bar->addChild(bg, 0, 1);
+        auto fill = CCLayerColor::create({ 255, 200, 60, 255 }, kBarW, kBarH);
+        fill->ignoreAnchorPointForPosition(false);
+        fill->setAnchorPoint({ 0.f, 0.f });
+        bar->addChild(fill, 1, 2);
+        pl->addChild(bar, 10000);
+    }
+    auto win = CCDirector::sharedDirector()->getWinSize();
+    float textH = hud->getScaledContentSize().height;
+    bar->setPosition(win.width - 6.f - kBarW, win.height - 6.f - textH - kBarH - 4.f);
+    if (auto fill = bar->getChildByTag(2)) fill->setScaleX(std::max(0.001f, progress));
 }
 
 // master switch: when off, all macro features are fully disabled.
@@ -890,16 +934,24 @@ bool pickNextInteger(Macro& m) {
     // wide shortcut (see farState): only once -1 and +1 both survived
     if (m.farState == 0 && m.minSurv <= -1 && m.maxSurv >= 1
         && !m.negDead && !m.negCapped && !m.posDead && !m.posCapped) {
+        m.farState = 3;
         m.farA = (m.maxWindow + 1) / 2;
         m.farB = m.maxWindow - m.farA; // farA + farB + 1 > maxWindow
-        if (m.farB > m.maxSurv && -m.farA >= m.negLimit - 1e-9 && m.farB <= m.posLimit + 1e-9)
+        if (Mod::get()->getSettingValue<bool>("fw-wide-shortcut")
+            && m.farB > m.maxSurv && -m.farA >= m.negLimit - 1e-9 && m.farB <= m.posLimit + 1e-9) {
+            // the far edges, then halfway back on each side: a "wide" verdict
+            // then needs a 1-frame death pocket hiding between checked frames
+            m.farList = { -m.farA, m.farB };
+            int ma = (m.farA + 1) / 2, mb = (m.farB + 1) / 2;
+            if (ma > 1 && ma < m.farA) m.farList.push_back(-ma);
+            if (mb > 1 && mb < m.farB) m.farList.push_back(mb);
+            m.farPos = 0;
             m.farState = 1;
-        else
-            m.farState = 3;
+        }
     }
-    if (m.farState == 1 || m.farState == 2) {
+    if (m.farState == 1) {
         m.phase = Phase::Integer;
-        m.offset = m.farState == 1 ? -m.farA : m.farB;
+        m.offset = m.farList[m.farPos];
         return true;
     }
     for (;;) {
@@ -924,7 +976,10 @@ bool pickNextInteger(Macro& m) {
 void setupRefine(Macro& m) {
     m.loRefined = m.hiRefined = false;
     m.refineSide = 0;
-    bool sub = m.target().mid && m.subSteps > 0
+    // With CBF a click can land anywhere inside a frame, so EVERY input of a
+    // CBF run gets a sub-frame window (as NaN measures them), not just the
+    // ones CBF happened to deliver mid-step when you recorded.
+    bool sub = (m.target().mid || m.cbfMacro) && m.subSteps > 0
         && (m.maxSurv - m.minSurv + 1) <= m.maxWindow;
     if (!sub) return;
     if (m.negDead) {
@@ -1165,12 +1220,12 @@ void advanceAnalysis(bool survived) {
         finishAnalysis();
         return;
     }
-    if (m.phase == Phase::Integer && (m.farState == 1 || m.farState == 2)) {
-        // far probe: both surviving = wide (assumes the survivors in between,
-        // like the linear walk would have found); any death = walk normally
+    if (m.phase == Phase::Integer && m.farState == 1) {
+        // shortcut probe: all surviving = wide; any death = walk every frame
         if (!survived) m.farState = 3;
-        else if (m.farState == 1) m.farState = 2;
-        else { m.minSurv = -m.farA; m.maxSurv = m.farB; m.farState = 3; }
+        else if (++m.farPos >= m.farList.size()) {
+            m.minSurv = -m.farA; m.maxSurv = m.farB; m.farState = 3;
+        }
         continueTarget();
         return;
     }
@@ -1192,6 +1247,7 @@ void startProbing() {
     log::info("[fw] probing {} inputs at {}x ({} anchors, {} tracked steps)",
         m.targets.size(), m.speed, m.anchors.size(), m.baseTrack.size());
     m.targetIdx = 0;
+    m.probingAt = std::chrono::steady_clock::now();
     nextTargets();
 }
 
@@ -1318,6 +1374,7 @@ void startAnalysis() {
         if (m.inputs[i].down || alsoReleases) m.targets.push_back(i);
     }
     if (m.targets.empty()) { notify("Analyze: no press inputs", NotificationIcon::Error); return; }
+    m.cbfMacro = nMid > 0 || cbf.active;
     m.results.assign(m.targets.size(), WinResult{});
     m.lastTargetStep = m.inputs[m.targets.back()].step;
     m.testCount = 0;
@@ -1329,8 +1386,8 @@ void startAnalysis() {
     m.speedPhase = false;
     setAnalyzeSpeed(1.f); // the first baseline always verifies at 1x
     int cps = pl->m_checkpointArray ? pl->m_checkpointArray->count() : 0;
-    FW_LOG("ANALYZE start inputs={} targets={} midStep={} maxWindow={} subframeSteps={} releases={} checkpoints={} (clearing)",
-        m.inputs.size(), m.targets.size(), nMid, m.maxWindow, m.subSteps, alsoReleases ? 1 : 0, cps);
+    FW_LOG("ANALYZE start inputs={} targets={} midStep={} cbf={} maxWindow={} subframeSteps={} releases={} checkpoints={} (clearing)",
+        m.inputs.size(), m.targets.size(), nMid, m.cbfMacro ? 1 : 0, m.maxWindow, m.subSteps, alsoReleases ? 1 : 0, cps);
     pl->removeAllCheckpoints();
     m.fastMode = Mod::get()->getSettingValue<bool>("analyze-fast");
     m.anchors.clear();
@@ -1602,6 +1659,7 @@ class $modify(MacroBGL, GJBaseGameLayer) {
                 m.testInline = more;
                 if (!more) break;
             }
+            if (m.mode == Mode::Analyzing) updateHud(); // live progress + ETA
         } else {
             GJBaseGameLayer::update(dt);
             // after the camera moved this frame: keep the rings pinned to the level
