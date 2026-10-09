@@ -302,7 +302,10 @@ struct Macro {
     int multiOffAt = -1;    // input index where back-to-back runs were switched off
     // where a test run's time goes (ms totals over the probing phase)
     double perfReset = 0, perfLoad = 0, perfSim = 0, perfDeath = 0;
-    int anchorMissing = 0, anchorTooLate = 0; // why a run didn't use a save-state
+    int anchorMissing = 0, anchorTooLate = 0, anchorNotListed = 0; // why a run didn't use a save-state
+    bool haveSpawn = false;   // where a restart puts the player (level start)
+    float spawnX = 0, spawnY = 0;
+    int driftLogs = 0;        // detailed drift reports written this analysis
     long perfRuns = 0;
     bool capturingAnchors = false;
     size_t nextAnchorCapture = 0;
@@ -828,6 +831,14 @@ bool anchorUsable(Macro& m, int tstep) {
     if (it == m.anchors.end() || !it->second.cp) { m.anchorMissing++; return false; }
     // even the widest negative shift must land after the snapshot
     if (it->second.step > tstep - m.maxWindow - 2) { m.anchorTooLate++; return false; }
+    // Must still be in GD's checkpoint list. Restoring one GD has dropped
+    // (its marker object taken out of the level's section grid) drifted every
+    // time and crashed GD with CBF ("vector too long" in addToSection).
+    auto pl = PlayLayer::get();
+    if (!pl || !pl->m_checkpointArray || !pl->m_checkpointArray->containsObject(it->second.cp)) {
+        m.anchorNotListed++;
+        return false;
+    }
     return true;
 }
 
@@ -913,10 +924,7 @@ void beginTest() {
     // replaying from the level start. Guarded so any missing/removed/suspect
     // anchor silently falls back to the normal full-replay path.
     if (probing && m.fastMode && pl) {
-        // NOT required: being in GD's checkpoint list. A full replay's
-        // resetLevelFromStart() clears that list, so the first input too early
-        // for a save-state used to disqualify every later one (fast mode never
-        // actually ran). Our Ref keeps the checkpoint alive regardless.
+        // (full replays no longer clear GD's checkpoint list -- see below)
         auto it = m.anchors.find(m.targetIdx);
         if (anchorUsable(m, tstep)) {
             auto const& a = it->second;
@@ -951,10 +959,27 @@ void beginTest() {
     if (probing) m.perfRuns++;
     m.restoredRun = restored;
     if (!restored && pl) {
-        // resetLevelFromStart() ALWAYS restarts at the level start -- unlike
-        // resetLevel(), which in practice mode respawns at the last checkpoint.
+        // Back to the level start. In practice mode resetLevel() would respawn
+        // at the last checkpoint, so that needs resetLevelFromStart() -- but
+        // that also CLEARS GD's checkpoint list, which threw away every save-
+        // state (fast mode never ran). In normal mode resetLevel() starts from
+        // the beginning and keeps the list. Checked: if a restart ever lands
+        // away from the level start, fall back for the rest of the analysis.
         auto tr = std::chrono::steady_clock::now();
-        pl->resetLevelFromStart();
+        if (pl->m_isPracticeMode) pl->resetLevelFromStart();
+        else pl->resetLevel();
+        if (pl->m_player1) {
+            auto sp = pl->m_player1->getPosition();
+            if (!m.haveSpawn) {
+                m.haveSpawn = true; m.spawnX = sp.x; m.spawnY = sp.y;
+            } else if (std::fabs(sp.x - m.spawnX) > 1.f || std::fabs(sp.y - m.spawnY) > 1.f) {
+                FW_WARN("restart landed at x {:.0f} y {:.0f}, not the start ({:.0f}, {:.0f}) -> "
+                        "restarting from the very start, save-states off", sp.x, sp.y, m.spawnX, m.spawnY);
+                pl->resetLevelFromStart();
+                m.fastMode = false;
+                m.anchors.clear();
+            }
+        }
         if (probing) m.perfReset += msSince(tr);
         m.step = 0;
         m.gameTime = 0;
@@ -1055,6 +1080,20 @@ bool pickNextRefine(Macro& m) {
 
 void finishAnalysis();
 
+// stop the analysis without results (error path)
+void abortAnalysis(std::string const& msg) {
+    auto& m = Macro::get();
+    m.mode = Mode::Idle;
+    setAnalyzeSpeed(1.f);
+    resetSplit();
+    m.anchors.clear();
+    if (auto pl = PlayLayer::get()) {
+        pl->removeAllCheckpoints();
+        pl->resetLevelFromStart();
+    }
+    notify(msg, NotificationIcon::Error);
+}
+
 // Record the current target's window and move targetIdx on. Never starts the
 // next target itself (nextTargets() loops), so a long run of inputs that need
 // no probes can't recurse.
@@ -1126,9 +1165,9 @@ void nextTargets() {
         // (only one that can actually be used: verifying an unusable one just
         // cost a full replay that "passed" and hid the problem)
         {
-            int ms = m.anchorMissing, mt = m.anchorTooLate;
+            int ms = m.anchorMissing, mt = m.anchorTooLate, mn = m.anchorNotListed;
             m.verifyingAnchor = m.fastMode && anchorUsable(m, m.target().step);
-            m.anchorMissing = ms; m.anchorTooLate = mt; // counted per run in beginTest
+            m.anchorMissing = ms; m.anchorTooLate = mt; m.anchorNotListed = mn; // counted per run in beginTest
         }
         if (m.verifyingAnchor) { beginTest(); return; }
         if (stepTarget()) return;
@@ -1257,8 +1296,8 @@ void finishAnalysis() {
            "speed={}x fast={} anchored={} full={} verifyFails={} multiPerFrame={} multiOffAt={} subSteps={} cbf={}",
         secs, refSecs, probeSecs, m.testCount, m.framesProbing, perFrame, m.speed, m.fastMode ? 1 : 0,
         m.nAnchored, m.nFull, m.verifyFails, m.multiOK ? 1 : 0, m.multiOffAt, m.subSteps, m.cbfMacro ? 1 : 0);
-    FW_LOG("SUMMARY PERF {} | no save-state: missing={} tooEarlyInLevel={}", perfLine(m),
-        m.anchorMissing, m.anchorTooLate);
+    FW_LOG("SUMMARY PERF {} | no save-state: missing={} tooEarlyInLevel={} notInGdList={}", perfLine(m),
+        m.anchorMissing, m.anchorTooLate, m.anchorNotListed);
     std::string fastInfo = fmt::format("\n{:.0f}s (ref {:.0f}s), {} runs, {:.1f}/frame, {}x, {}% save-states{}",
         secs, refSecs, m.testCount, perFrame, (int)m.speed, m.fastMode ? pct : 0,
         m.multiOK ? "" : ", multi OFF");
@@ -1329,6 +1368,7 @@ void onTestResolved() {
             setAnalyzeSpeed(m.speed);
             m.speedDrift = false;
             m.anchors.clear(); // captured at the bad speed -> recapture at the new one
+            if (auto plc = PlayLayer::get()) plc->removeAllCheckpoints();
             if (lower <= 1) {
                 m.speedPhase = false;
                 m.checkingSpeed = false;
@@ -1375,7 +1415,10 @@ void onTestResolved() {
             m.speedDrift = false;
             m.trackBase = false;
             setAnalyzeSpeed(m.speed);
-            if (m.fastMode) { m.capturingAnchors = true; m.nextAnchorCapture = 0; m.anchors.clear(); }
+            if (m.fastMode) {
+                m.capturingAnchors = true; m.nextAnchorCapture = 0; m.anchors.clear();
+                if (auto plc = PlayLayer::get()) plc->removeAllCheckpoints();
+            }
             beginTest();
             return;
         }
@@ -1448,6 +1491,11 @@ void startAnalysis() {
         m.inputs.size(), m.targets.size(), nMid, m.cbfMacro ? 1 : 0, m.maxWindow, m.subSteps, alsoReleases ? 1 : 0, cps);
     pl->removeAllCheckpoints();
     m.fastMode = Mod::get()->getSettingValue<bool>("analyze-fast");
+    if (m.fastMode && pl->m_isPracticeMode) {
+        // practice restarts-from-start clear GD's checkpoint list = no save-states
+        m.fastMode = false;
+        notify("Fast analysis needs normal mode (not practice).\nAnalyzing without it.", NotificationIcon::Warning);
+    }
     m.anchors.clear();
     m.nextAnchorCapture = 0;
     m.anchorStep.assign(m.targets.size(), 0);
@@ -1468,7 +1516,9 @@ void startAnalysis() {
     m.framesProbing = 0;
     m.perfReset = m.perfLoad = m.perfSim = m.perfDeath = 0;
     m.perfRuns = 0;
-    m.anchorMissing = m.anchorTooLate = 0;
+    m.anchorMissing = m.anchorTooLate = m.anchorNotListed = 0;
+    m.haveSpawn = false;
+    m.driftLogs = 0;
     m.verifyFails = 0;
     m.multiOffAt = -1;
     m.startedAt = std::chrono::steady_clock::now();
@@ -1651,6 +1701,16 @@ class $modify(MacroBGL, GJBaseGameLayer) {
                 if (!dead && m_player1 && m.step < static_cast<int>(m.baseTrack.size())) {
                     auto const& bt = m.baseTrack[m.step];
                     if (std::fabs(cx - bt.x) > 0.1f || std::fabs(cy - bt.y) > 0.1f) {
+                        if (m.driftLogs++ < 8) {
+                            auto it = m.anchors.find(m.targetIdx);
+                            int as = it != m.anchors.end() ? it->second.step : -1;
+                            FW_WARN("DRIFT input #{} anchor@{} first off at step {} (+{} after restore): "
+                                    "dx {:+.3f} dy {:+.3f} vy {:.3f} vs {:.3f} ground={} ship={} dart={} ball={} ufo={} inline={}",
+                                m.targets[m.targetIdx], as, m.step, m.step - as, cx - bt.x, cy - bt.y,
+                                static_cast<float>(m_player1->m_yVelocity), bt.vy, m_player1->m_isOnGround ? 1 : 0,
+                                m_player1->m_isShip ? 1 : 0, m_player1->m_isDart ? 1 : 0, m_player1->m_isBall ? 1 : 0,
+                                m_player1->m_isBird ? 1 : 0, m.testInline ? 1 : 0);
+                        }
                         m.anchorDrift = true;
                         m.testResolved = true;
                         m.lastSurvived = false;
@@ -1702,8 +1762,18 @@ class $modify(MacroBGL, GJBaseGameLayer) {
             auto t0 = std::chrono::steady_clock::now();
             for (int runs = 0;; runs++) {
                 auto ts = std::chrono::steady_clock::now();
-                for (int i = 0; i < kFF && !m.testResolved; i++)
-                    GJBaseGameLayer::update(dt);
+                try {
+                    for (int i = 0; i < kFF && !m.testResolved; i++)
+                        GJBaseGameLayer::update(dt);
+                } catch (std::exception const& e) {
+                    // GD threw mid-run (e.g. a corrupted restore). Stop cleanly
+                    // with the context in the log instead of crashing the game.
+                    FW_WARN("GD threw during a test run: '{}' input #{} offset {:.3f} restored={} inline={} step {}",
+                        e.what(), m.targetIdx < m.targets.size() ? m.targets[m.targetIdx] : 0, m.offset,
+                        m.restoredRun ? 1 : 0, m.testInline ? 1 : 0, m.step);
+                    abortAnalysis("Analysis stopped: GD hit an error during a test run.\nSend geode.log, please.");
+                    return;
+                }
                 if (!m.baseline) m.perfSim += msSince(ts);
                 // hang guard: a test that never resolves (stuck/desync) is treated
                 // as "survived" so it can't fabricate a frame-perfect, then we move on.
