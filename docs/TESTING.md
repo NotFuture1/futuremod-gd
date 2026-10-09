@@ -1,4 +1,4 @@
-# Testing the frame window counter (v1.10.0)
+# Testing the frame window counter (v1.10.1)
 
 Do the tests in order. Each one tells you what to look for, what counts as a
 pass, and what to send back. Everything the mod reports goes to `geode.log`

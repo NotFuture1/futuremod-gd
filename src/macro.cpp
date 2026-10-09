@@ -501,10 +501,22 @@ struct SplitState {
     bool p1Split = false, p2Split = false;
     float rotationDelta = 0.f;
     CCPoint p1Pos{}, p2Pos{};
+    int splitStep = -1;     // last step our replay split (CBF input)
+    bool splitExact = false; // ...using CBF's recorded deltas (vs rebuilt ones)
 } g_split;
+// playback diagnostics: how CBF steps were replayed, and where it first went off
+struct PlayDiag {
+    int exactSteps = 0, rebuiltSteps = 0;
+    bool firstLogged = false;
+} g_play;
 float g_shipRotDelta = 0.f;
 
-void resetSplit() { g_split = SplitState{}; g_shipRotDelta = 0.f; }
+void resetSplit() {
+    int ss = g_split.splitStep; bool se = g_split.splitExact;
+    g_split = SplitState{};
+    g_split.splitStep = ss; g_split.splitExact = se; // diagnostics survive per-test resets
+    g_shipRotDelta = 0.f;
+}
 
 void finalizePending(Macro& m) {
     double total = std::max(g_acc.el[0], g_acc.el[1]);
@@ -748,8 +760,8 @@ void logPlaybackVerdict(char const* why) {
     char const* v = m.track.empty() ? "NOTRACK"
         : m.maxDrift < 0.01f ? "EXACT"
         : m.maxDrift < 1.0f ? "CLOSE" : "DRIFT";
-    FW_LOG("PLAYBACK end={} step={} maxDrift={:.3f}u @step {} VERDICT={}",
-        why, m.step, m.maxDrift, m.maxDriftStep, v);
+    FW_LOG("PLAYBACK end={} step={} maxDrift={:.3f}u @step {} VERDICT={} cbfSteps exact={} rebuilt={}",
+        why, m.step, m.maxDrift, m.maxDriftStep, v, g_play.exactSteps, g_play.rebuiltSteps);
 }
 
 void startPlaying() {
@@ -767,6 +779,7 @@ void startPlaying() {
     m.verdictLogged = false;
     m.maxDrift = 0.f;
     m.maxDriftStep = -1;
+    g_play = PlayDiag{};
     auto wins = m.buildRings(); // rings + counter from the last analysis
     logEnv("play", pl);
     updateHud(); // clears the analyzer's corner text
@@ -1670,6 +1683,18 @@ class $modify(MacroBGL, GJBaseGameLayer) {
                 float dx = pos.x - rec.first, dy = pos.y - rec.second;
                 float drift = std::sqrt(dx * dx + dy * dy);
                 if (drift > m.maxDrift) { m.maxDrift = drift; m.maxDriftStep = m.step; }
+                if (drift > 0.01f && !g_play.firstLogged) {
+                    // where the replay FIRST left your recording, and what was going on
+                    g_play.firstLogged = true;
+                    FW_WARN("PLAYBACK first off at step {}: dx {:+.4f} dy {:+.4f} ship={} wave={} ufo={} ball={} "
+                            "robot={} spider={} swing={} ground={} | last CBF split step {} ({}){}",
+                        m.step, pos.x - rec.first, pos.y - rec.second,
+                        m_player1->m_isShip ? 1 : 0, m_player1->m_isDart ? 1 : 0, m_player1->m_isBird ? 1 : 0,
+                        m_player1->m_isBall ? 1 : 0, m_player1->m_isRobot ? 1 : 0, m_player1->m_isSpider ? 1 : 0,
+                        m_player1->m_isSwing ? 1 : 0, m_player1->m_isOnGround ? 1 : 0,
+                        g_split.splitStep, g_split.splitExact ? "exact CBF deltas" : "rebuilt deltas",
+                        g_split.splitStep == m.step ? " <- this step" : "");
+                }
             }
         } else if (m.mode == Mode::Analyzing && !m.testResolved) {
             // 1x baseline: record the ground-truth reference track, and compare it
@@ -2036,6 +2061,9 @@ class $modify(FwSplitPlayer, PlayerObject) {
             for (float f : it->second) sum += f;
             if (same && std::fabs(sum - dt) <= 1e-6 * std::fabs(dt) + 1e-9) exact = &it->second;
         }
+        g_split.splitStep = m.step;
+        g_split.splitExact = exact != nullptr;
+        if (m.mode == Mode::Playing) (exact ? g_play.exactSteps : g_play.rebuiltSteps)++;
         fwSplitStep(pl, dt, evs, exact);
     }
 
@@ -2185,6 +2213,7 @@ class $modify(MacroPlayLayer, PlayLayer) {
             m.verdictLogged = false;
             m.maxDrift = 0.f;
             m.maxDriftStep = -1;
+            g_play = PlayDiag{};
             fw::display::restart(this); // fresh attempt: clear rings, zero the counter
             if (m.haveSeed) { m_randomSeed = m.seed1; m_replayRandSeed = m.seed2; }
         } else if (m.mode == Mode::Analyzing) {
