@@ -20,6 +20,7 @@
 #include <cmath>
 #include <limits>
 #include <chrono>
+#include <cstring>
 
 using namespace geode::prelude;
 
@@ -214,6 +215,13 @@ struct Macro {
 
     std::unordered_map<CheckpointObject*, int> cpStep;
 
+    // The exact player-1 update deltas CBF used for each step it split while
+    // recording (step -> deltas, one more than that step's mid-step inputs).
+    // Replay uses them bit-for-bit: rebuilding them from the saved fractions
+    // could land a float ulp off, and over hundreds of CBF clicks that drifted
+    // replays by a few units (enough to die).
+    std::unordered_map<int, std::vector<float>> subDts;
+
     // --- analyzer ---
     std::vector<size_t> targets;
     std::vector<WinResult> results;
@@ -370,6 +378,14 @@ struct Macro {
         for (auto const& sw : savedWindows)
             out += fmt::format("W {} {:.4f} {} {:.4f} {:.4f} {} {}\n", sw.idx, sw.window, sw.status,
                 sw.lo, sw.hi, sw.tap, sw.sub);
+        for (auto const& [st, dts] : subDts) {
+            out += fmt::format("D {} {}", st, dts.size());
+            for (float f : dts) {
+                uint32_t bits; std::memcpy(&bits, &f, 4);
+                out += fmt::format(" {}", bits);
+            }
+            out += "\n";
+        }
         auto res = file::writeString(path(), out);
         if (!res) log::warn("[macro] save failed: {}", res.unwrapErr());
     }
@@ -389,6 +405,7 @@ struct Macro {
         inputs.clear();
         savedWindows.clear();
         track.clear();
+        subDts.clear();
         haveSeed = false;
         seed1 = seed2 = 0;
         auto res = file::readString(pathForKey(key));
@@ -404,6 +421,20 @@ struct Macro {
         int nMid = 0;
         while (std::getline(ss, line)) {
             if (line.empty()) continue;
+            if (line[0] == 'D') {
+                std::istringstream sd(line);
+                std::string tag; int st; size_t n;
+                if (sd >> tag >> st >> n && n > 0 && n < 4096) {
+                    std::vector<float> dts;
+                    uint32_t bits;
+                    while (dts.size() < n && sd >> bits) {
+                        float f; std::memcpy(&f, &bits, 4);
+                        dts.push_back(f);
+                    }
+                    if (dts.size() == n) subDts[st] = std::move(dts);
+                }
+                continue;
+            }
             if (line[0] == 'W') {
                 std::istringstream sw(line);
                 std::string tag; int idx; double w; std::string st;
@@ -437,8 +468,8 @@ struct Macro {
             float x, y;
             while (ts >> x >> y) track.push_back({ x, y });
         }
-        log::info("[macro] level '{}': loaded {} inputs ({} mid-step/CBF), {} windows, {} track pts",
-            key, inputs.size(), nMid, savedWindows.size(), track.size());
+        log::info("[macro] level '{}': loaded {} inputs ({} mid-step/CBF, {} steps with exact CBF deltas), {} windows, {} track pts",
+            key, inputs.size(), nMid, subDts.size(), savedWindows.size(), track.size());
     }
 };
 
@@ -454,6 +485,7 @@ int g_inP1Update = 0;    // depth of player-1 PlayerObject::update (outermost ho
 struct RecAcc {
     double el[2] = { 0.0, 0.0 };                       // update time so far, P1 / P2
     std::vector<std::pair<size_t, double>> pending;   // (input index, elapsed at input)
+    std::vector<float> p1dts;                          // each player-1 update delta this step
 } g_acc;
 
 // Recording: which players a real input actually pushed (hooked pushButton).
@@ -476,6 +508,12 @@ void resetSplit() { g_split = SplitState{}; g_shipRotDelta = 0.f; }
 
 void finalizePending(Macro& m) {
     double total = std::max(g_acc.el[0], g_acc.el[1]);
+    // the step CBF split: keep its exact deltas (only when player 1 was split,
+    // i.e. one delta per gap between its mid-step inputs)
+    if (!g_acc.pending.empty() && g_acc.pending[0].first < m.inputs.size()
+        && g_acc.p1dts.size() == g_acc.pending.size() + 1)
+        m.subDts[m.inputs[g_acc.pending[0].first].step] = g_acc.p1dts;
+    g_acc.p1dts.clear();
     for (auto const& [idx, el] : g_acc.pending) {
         if (idx >= m.inputs.size()) continue;
         double f = total > 0.0 ? el / total : 0.0;
@@ -673,6 +711,7 @@ void startRecording() {
     fw::display::stop(pl); // rings belong to playback
     m.mode = Mode::Recording;
     m.inputs.clear();
+    m.subDts.clear();
     m.cpStep.clear();
     m.track.clear();
     m.step = 0;
@@ -697,7 +736,8 @@ void stopRecording() {
     m.saveTrack();
     int nMid = 0;
     for (auto const& in : m.inputs) if (in.mid) nMid++;
-    FW_LOG("RECORDED inputs={} midStep={} lastStep={}", m.inputs.size(), nMid, m.inputs.back().step);
+    FW_LOG("RECORDED inputs={} midStep={} lastStep={} exactCbfSteps={}", m.inputs.size(), nMid,
+        m.inputs.back().step, m.subDts.size());
     notify(fmt::format("Macro: recorded + saved {} inputs", m.inputs.size()), NotificationIcon::Success);
 }
 
@@ -1384,6 +1424,9 @@ void onTestResolved() {
         if (!m.lastSurvived) {
             m.mode = Mode::Idle;
             setAnalyzeSpeed(1.f);
+            resetSplit();
+            m.anchors.clear();
+            if (auto plc = PlayLayer::get()) plc->removeAllCheckpoints();
             FW_WARN("BASELINE FAIL stopped moving @ step {} (x {:.0f}) driftVsRecording={:.3f}u @step {}",
                 m.deathStep, m.lastCx, m.baseDriftMax, m.baseDriftStep);
             std::string msg;
@@ -1876,7 +1919,8 @@ class $modify(FwSplitPlayer, PlayerObject) {
 #endif
     }
 
-    void fwSplitStep(PlayLayer* pl, float stepDelta, std::vector<std::pair<size_t, double>> const& evs) {
+    void fwSplitStep(PlayLayer* pl, float stepDelta, std::vector<std::pair<size_t, double>> const& evs,
+                     std::vector<float> const* exact) {
         auto& m = Macro::get();
         PlayerObject* p2 = pl->m_player2;
         bool isDual = pl->m_gameState.m_isDualMode;
@@ -1911,7 +1955,7 @@ class $modify(FwSplitPlayer, PlayerObject) {
             bool endStep = (k + 1 == factors.size());
             // CBF applies each input when the NEXT substep is popped
             if (k > 0) fireInput(pl, evs[k - 1].first);
-            const float substepDelta = stepDelta * factors[k];
+            const float substepDelta = exact ? (*exact)[k] : static_cast<float>(stepDelta * factors[k]);
             g_split.rotationDelta = substepDelta;
 
             if (g_split.p1Split) {
@@ -1979,7 +2023,20 @@ class $modify(FwSplitPlayer, PlayerObject) {
             PlayerObject::update(dt);
             return;
         }
-        fwSplitStep(pl, dt, evs);
+        // Every input in this step at its recorded time (not a shifted probe
+        // input, not overdue) -> replay CBF's recorded deltas bit-for-bit.
+        std::vector<float> const* exact = nullptr;
+        if (auto it = m.subDts.find(m.step); it != m.subDts.end() && it->second.size() == evs.size() + 1) {
+            bool same = true;
+            for (size_t k = 0; k < evs.size() && same; k++) {
+                auto const& in = m.inputs[evs[k].first];
+                same = in.mid && in.step == m.step && evs[k].second == in.frac;
+            }
+            double sum = 0;
+            for (float f : it->second) sum += f;
+            if (same && std::fabs(sum - dt) <= 1e-6 * std::fabs(dt) + 1e-9) exact = &it->second;
+        }
+        fwSplitStep(pl, dt, evs, exact);
     }
 
     void updateRotation(float t) {
@@ -2024,7 +2081,7 @@ class $modify(FwAccumPlayer, PlayerObject) {
     void update(float dt) {
         if (Macro::get().mode == Mode::Recording && !fw::ghost::isSim()) {
             if (auto pl = PlayLayer::get()) {
-                if (this == pl->m_player1) g_acc.el[0] += dt;
+                if (this == pl->m_player1) { g_acc.el[0] += dt; g_acc.p1dts.push_back(dt); }
                 else if (this == pl->m_player2) g_acc.el[1] += dt;
             }
         }
@@ -2111,6 +2168,7 @@ class $modify(MacroPlayLayer, PlayLayer) {
             g_acc = RecAcc{};
             if (cpCount == 0) {
                 m.inputs.clear();
+                m.subDts.clear();
                 m.cpStep.clear();
                 m.track.clear();
                 m.step = 0;
@@ -2170,6 +2228,8 @@ class $modify(MacroPlayLayer, PlayLayer) {
                 m.step = it->second;
                 m.gameTime = m.step / 240.0;
                 while (!m.inputs.empty() && m.inputs.back().step >= m.step) m.inputs.pop_back();
+                for (auto it = m.subDts.begin(); it != m.subDts.end();)
+                    it = it->first >= m.step ? m.subDts.erase(it) : std::next(it);
                 if (static_cast<int>(m.track.size()) > m.step) m.track.resize(m.step);
             }
         }
@@ -2226,16 +2286,11 @@ class $modify(MacroPlayLayer, PlayLayer) {
     }
 };
 
-class $modify(FwQuietPlayer, PlayerObject) {
-    void playDeathEffect() {
-        if (Macro::get().mode == Mode::Analyzing) return;
-        PlayerObject::playDeathEffect();
-    }
-};
-
-// Analysis is silent and skips the death explosion: none of it affects
-// physics, and restarting/seeking the song on every one of thousands of
-// resets was a big part of each test run's cost. Skipped at the audio-engine
+// Analysis is silent: none of it affects physics, and restarting/seeking the
+// song on every one of thousands of resets was a big part of each test run's
+// cost. (The death explosion is NOT skipped any more: GD's own post-death
+// reset expects it, and skipping it was the likely cause of a crash when
+// leaving the level after a failed analysis.) Skipped at the audio-engine
 // level only, so GD's own level-start flow (music "prepared" etc.) is intact.
 class $modify(FwQuietAudio, FMODAudioEngine) {
     void playMusic(gd::string path, bool shouldLoop, float fadeInTime, int channel) {
