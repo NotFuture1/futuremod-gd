@@ -21,9 +21,10 @@ void start(PlayLayer* pl, std::vector<double> const& windows);
 void restart(PlayLayer* pl);
 // Playback stopped: remove rings and the counter.
 void stop(PlayLayer* pl);
-// A measured input just fired on `player` (mid-step for CBF inputs, so the
-// player is exactly where the click happened).
-void onInput(PlayLayer* pl, PlayerObject* player, double window);
+// A measured input just fired on `players` (mid-step for CBF inputs, so each
+// is exactly where the click happened). One input: counted and sounded once,
+// with a ring on every icon it moved (both in dual mode).
+void onInput(PlayLayer* pl, std::vector<PlayerObject*> const& players, double window);
 // Once per frame after the camera has moved: keep the rings pinned to the level.
 void tick(PlayLayer* pl);
 

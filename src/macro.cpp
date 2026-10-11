@@ -667,9 +667,18 @@ void fireInput(GJBaseGameLayer* l, size_t idx) {
     if (m.mode != Mode::Playing || idx >= m.winByInput.size() || std::isnan(m.winByInput[idx])) return;
     auto pl = PlayLayer::get();
     if (!pl || static_cast<GJBaseGameLayer*>(pl) != l) return;
-    int mask = in.mask ? in.mask : (in.player1 ? 1 : 2);
-    auto p = (mask & 1) ? pl->m_player1 : pl->m_player2;
-    fw::display::onInput(pl, p ? p : pl->m_player1, m.winByInput[idx]);
+    // ring on every icon the input moved: both in dual mode (one button
+    // drives both), one per side with 2-player controls
+    int mask = in.mask;
+    if (!mask) { // macros from before the per-input capture
+        bool twoP = pl->m_levelSettings && pl->m_levelSettings->m_twoPlayerMode;
+        mask = (pl->m_gameState.m_isDualMode && !twoP) ? 3 : (in.player1 ? 1 : 2);
+    }
+    std::vector<PlayerObject*> ps;
+    if ((mask & 1) && pl->m_player1) ps.push_back(pl->m_player1);
+    if ((mask & 2) && pl->m_player2 && pl->m_gameState.m_isDualMode) ps.push_back(pl->m_player2);
+    if (ps.empty() && pl->m_player1) ps.push_back(pl->m_player1);
+    fw::display::onInput(pl, ps, m.winByInput[idx]);
 }
 
 // Build the input schedule for a replay. When `shifted`, the analyzer's target

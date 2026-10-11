@@ -302,8 +302,8 @@ void stop(PlayLayer* pl) {
     if (auto old = pl->getChildByTag(kCounterTag)) old->removeFromParent();
 }
 
-void onInput(PlayLayer* pl, PlayerObject* player, double window) {
-    if (!pl || !player) return;
+void onInput(PlayLayer* pl, std::vector<PlayerObject*> const& players, double window) {
+    if (!pl || players.empty()) return;
     int b = bucketOf(window);
     g_counts.hit[b]++;
     playWindowSound(window);
@@ -311,18 +311,21 @@ void onInput(PlayLayer* pl, PlayerObject* player, double window) {
     bumpCounter(pl, b);
 
     auto ol = pl->m_objectLayer;
-    auto parent = player->getParent();
-    if (!ol || !parent) return;
-    // in object-layer space, whatever the player's actual parent is
-    CCPoint lp = ol->convertToNodeSpace(parent->convertToWorldSpace(player->getPosition()));
-    auto ring = FwRing::create(lp, window);
-    if (!ring) return;
+    if (!ol) return;
     auto layer = ringLayer(pl, true);
-    layer->addChild(ring);
-    place(pl, layer, ring, ringSize());
-
-    if (auto kids = layer->getChildren(); kids && kids->count() > kMaxRings)
-        static_cast<CCNode*>(kids->objectAtIndex(0))->removeFromParent();
+    float size = ringSize();
+    for (auto player : players) {
+        auto parent = player ? player->getParent() : nullptr;
+        if (!parent) continue;
+        // in object-layer space, whatever the player's actual parent is
+        CCPoint lp = ol->convertToNodeSpace(parent->convertToWorldSpace(player->getPosition()));
+        auto ring = FwRing::create(lp, window);
+        if (!ring) continue;
+        layer->addChild(ring);
+        place(pl, layer, ring, size);
+    }
+    while (layer->getChildrenCount() > kMaxRings)
+        static_cast<CCNode*>(layer->getChildren()->objectAtIndex(0))->removeFromParent();
 }
 
 void tick(PlayLayer* pl) {
