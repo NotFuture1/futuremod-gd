@@ -50,6 +50,7 @@ constexpr int kMargin     = 48;  // ticks past the last input the BASELINE / anc
 // and cap a pathological gap with no inputs (max).
 constexpr int kMinHorizon = 24; // classic rule only
 constexpr int kGrace      = 2;  // ticks after the correcting input to register a death
+constexpr double kPushGap = 1.0; // frames kept between a shifted click and a neighbour it pushes
 constexpr int kMaxHorizon = 240;
 constexpr double kFrameBudgetMs = 28.0; // analysis work per rendered frame (~35 fps on screen)
 constexpr int kFF      = 1;   // 1 = no fast-forward (FF corrupts physics -> false deaths)
@@ -233,7 +234,14 @@ struct Macro {
     int minSurv = 0, maxSurv = 0;
     bool negDead = false, posDead = false;     // side closed by a death
     bool negCapped = false, posCapped = false; // side closed by the adjacent input
-    double negLimit = -1e9, posLimit = 1e9;    // how far the shift may go before crossing an input
+    double negLimit = -1e9, posLimit = 1e9;    // how far the shift may go (level start)
+    // This probe's shifted input times: the target, its tap pair, and any
+    // same-button neighbours PUSHED along so the clicks stay in order (instead
+    // of stopping -- "capping" -- at them, which under-measured those windows).
+    std::unordered_map<size_t, double> shiftT;
+    int movedFirst = 0, movedLast = 0; // steps of the earliest / latest changed input
+    size_t movedLastIdx = 0;           // input index of the latest changed input
+    int pushedMax = 0;                 // most neighbours one probe pushed (per target, for the log)
     bool tapMode = false;  // press shifted together with its (close) release
     long pairIdx = -1;     // that release
     bool hadTimeout = false;
@@ -337,7 +345,9 @@ struct Macro {
 
     // step the tested input actually happens at in this probe (shifted when offset<0)
     int effTargetStep() const {
-        return static_cast<int>(std::floor(target().t() + std::min(0.0, offset) + 1e-9));
+        int s = static_cast<int>(std::floor(target().t() + std::min(0.0, offset) + 1e-9));
+        // a pushed neighbour that moved earlier is part of this shift too
+        return shiftT.empty() ? s : std::min(s, movedFirst);
     }
 
     // a death only counts against the tested input if the run reached the SHIFTED
@@ -686,16 +696,11 @@ void fireInput(GJBaseGameLayer* l, size_t idx) {
 void buildSchedule(Macro& m, bool shifted) {
     m.sched.clear();
     m.sched.reserve(m.inputs.size());
-    long tgt = -1, pair = -1;
-    if (shifted && m.targetIdx < m.targets.size()) {
-        tgt = static_cast<long>(m.targets[m.targetIdx]);
-        pair = m.tapMode ? m.pairIdx : -1;
-    }
     for (size_t i = 0; i < m.inputs.size(); i++) {
         auto const& in = m.inputs[i];
-        long li = static_cast<long>(i);
-        if ((li == tgt || li == pair) && m.offset != 0.0) {
-            double T = std::max(0.0, in.t() + m.offset);
+        auto sh = shifted ? m.shiftT.find(i) : m.shiftT.end();
+        if (sh != m.shiftT.end()) {
+            double T = sh->second;
             int st = static_cast<int>(std::floor(T + 1e-9));
             double fr = T - st;
             if (fr < 1e-9) fr = 0.0;
@@ -831,15 +836,60 @@ void computeLimits(Macro& m) {
         m.pairIdx = next;
     }
 
-    m.negLimit = -in.t(); // never before the level start
-    if (prev >= 0) m.negLimit = std::max(m.negLimit, m.inputs[prev].t() - in.t());
-
+    // Neighbours no longer cap the shift -- they get pushed along (see
+    // computeShift). The only hard limit: a backward push chain can't go
+    // before the level start (each pushed click needs kPushGap of room).
+    (void)prev;
+    int before = 0;
+    for (size_t j = 0; j < ti; j++) if (same(j)) before++;
+    m.negLimit = before * kPushGap - in.t();
     m.posLimit = 1e9;
-    if (m.tapMode) {
-        for (size_t j = static_cast<size_t>(m.pairIdx) + 1; j < m.inputs.size(); j++)
-            if (same(j)) { m.posLimit = m.inputs[j].t() - m.inputs[m.pairIdx].t(); break; }
-    } else if (next >= 0) {
-        m.posLimit = m.inputs[next].t() - in.t();
+}
+
+// Shifted input times for the current probe. The target (and its tap pair)
+// move by `offset`; a same-button click that would now be crossed is pushed
+// to kPushGap beyond it, and so on down the chain.
+void computeShift(Macro& m) {
+    m.shiftT.clear();
+    if (m.offset == 0.0 || m.targetIdx >= m.targets.size()) return;
+    size_t ti = m.targets[m.targetIdx];
+    auto const& tg = m.inputs[ti];
+    auto same = [&](size_t j) {
+        return m.inputs[j].button == tg.button && m.inputs[j].player1 == tg.player1;
+    };
+    size_t lo = ti, hi = ti;
+    m.shiftT[ti] = std::max(0.0, tg.t() + m.offset);
+    if (m.tapMode && m.pairIdx >= 0) {
+        hi = static_cast<size_t>(m.pairIdx);
+        m.shiftT[hi] = std::max(0.0, m.inputs[hi].t() + m.offset);
+    }
+    int pushed = 0;
+    double edge = m.shiftT[hi];
+    for (size_t j = hi + 1; j < m.inputs.size(); j++) {
+        if (!same(j)) continue;
+        if (m.inputs[j].t() >= edge + kPushGap - 1e-9) break;
+        edge += kPushGap;
+        m.shiftT[j] = edge;
+        pushed++;
+    }
+    edge = m.shiftT[lo];
+    for (long j = static_cast<long>(lo) - 1; j >= 0; j--) {
+        if (!same(static_cast<size_t>(j))) continue;
+        if (m.inputs[j].t() <= edge - kPushGap + 1e-9) break;
+        edge = std::max(0.0, edge - kPushGap);
+        m.shiftT[static_cast<size_t>(j)] = edge;
+        pushed++;
+    }
+    m.pushedMax = std::max(m.pushedMax, pushed);
+    m.movedFirst = std::numeric_limits<int>::max();
+    m.movedLast = std::numeric_limits<int>::min();
+    for (auto const& [idx, T] : m.shiftT) {
+        int st = static_cast<int>(std::floor(T + 1e-9));
+        m.movedFirst = std::min(m.movedFirst, st);
+        if (st > m.movedLast || (st == m.movedLast && idx > m.movedLastIdx)) {
+            m.movedLast = st;
+            m.movedLastIdx = idx;
+        }
     }
 }
 
@@ -888,11 +938,14 @@ int correctingStep(Macro& m, size_t after) {
 
 // Can this input's test runs start from its save-state? Counts the reasons
 // when not, for the SUMMARY line.
-bool anchorUsable(Macro& m, int tstep) {
+bool anchorUsable(Macro& m, int tstep, int firstChange) {
     auto it = m.anchors.find(m.targetIdx);
     if (it == m.anchors.end() || !it->second.cp) { m.anchorMissing++; return false; }
     // even the widest negative shift must land after the snapshot
     if (it->second.step > tstep - m.maxWindow - 2) { m.anchorTooLate++; return false; }
+    // inputs AT the snapshot step are baked in: everything this probe changes
+    // (incl. pushed neighbours) must come strictly after it
+    if (it->second.step >= firstChange) { m.anchorTooLate++; return false; }
     // Must still be in GD's checkpoint list. Restoring one GD has dropped
     // (its marker object taken out of the level's section grid) drifted every
     // time and crashed GD with CBF ("vector too long" in addToSection).
@@ -933,6 +986,8 @@ void beginTest() {
 
     bool probing = !m.baseline;
     int tstep = probing ? m.target().step : 0;
+    if (probing && !m.verifyingAnchor) computeShift(m);
+    else m.shiftT.clear();
     if (m.baseline) {
         m.marginEnd = m.lastTargetStep + kMargin;
     } else {
@@ -942,7 +997,10 @@ void beginTest() {
         // the window probes use.
         size_t ti = m.targets[m.targetIdx];
         size_t after = m.tapMode ? static_cast<size_t>(m.pairIdx) : ti;
+        // pushed neighbours later in the level are part of the gesture too
+        if (!m.shiftT.empty()) after = std::max(after, m.movedLastIdx);
         int shifted = static_cast<int>(std::floor(m.target().t() + m.offset + 1e-9));
+        if (!m.shiftT.empty()) shifted = std::max(shifted, m.movedLast);
         if (Mod::get()->getSettingValue<bool>("fw-classic-horizon")) {
             // v1.5 rule: until the next input of any kind, at least 24 ticks
             int nextStep = (after + 1 < m.inputs.size()) ? m.inputs[after + 1].step
@@ -971,6 +1029,12 @@ void beginTest() {
         int lastOrig = m.tapMode ? m.inputs[m.pairIdx].step : tstep;
         m.probeSettleStep = std::max(lastOrig, static_cast<int>(
             std::floor(m.inputs[m.tapMode ? m.pairIdx : ti].t() + std::max(0.0, m.offset)))) + 2;
+        if (!m.shiftT.empty()) {
+            // every changed input (and every pushed one's original slot) must be passed
+            m.probeSettleStep = std::max(m.probeSettleStep, m.movedLast + 2);
+            for (auto const& [idx, T] : m.shiftT)
+                m.probeSettleStep = std::max(m.probeSettleStep, m.inputs[idx].step + 2);
+        }
     }
     buildSchedule(m, probing);
 
@@ -988,7 +1052,8 @@ void beginTest() {
     if (probing && m.fastMode && pl) {
         // (full replays no longer clear GD's checkpoint list -- see below)
         auto it = m.anchors.find(m.targetIdx);
-        if (anchorUsable(m, tstep)) {
+        int firstChange = m.shiftT.empty() ? tstep : std::min(tstep, m.movedFirst);
+        if (anchorUsable(m, tstep, firstChange)) {
             auto const& a = it->second;
             // resetLevel FIRST: it cancels any auto-respawn GD still has pending
             // from the previous probe's death; the checkpoint then overrides it.
@@ -1188,9 +1253,9 @@ void finalizeTarget() {
         if (r.window <= 4.0 + 1e-9) m.c60++;
     }
     auto const& in = m.target();
-    FW_LOG("WIN #{} {} p{} step={} frac={:.3f} window={:.3f} lo={:+.3f} hi={:+.3f} status={} tap={} sub={}",
+    FW_LOG("WIN #{} {} p{} step={} frac={:.3f} window={:.3f} lo={:+.3f} hi={:+.3f} status={} tap={} sub={} pushed={}",
         m.targets[m.targetIdx], in.down ? "press" : "release", in.player1 ? 1 : 2, in.step, in.frac,
-        r.window, r.lo, r.hi, statusName(r.status), r.tap ? 1 : 0, r.subframe ? 1 : 0);
+        r.window, r.lo, r.hi, statusName(r.status), r.tap ? 1 : 0, r.subframe ? 1 : 0, m.pushedMax);
 
     m.targetIdx++;
     if (m.targetIdx % 25 == 0)
@@ -1222,13 +1287,14 @@ void nextTargets() {
         m.phase = Phase::Integer;
         m.offset = 0.0;
         m.farState = 0;
+        m.pushedMax = 0;
         computeLimits(m);
         // fast mode: verify this input's anchor first
         // (only one that can actually be used: verifying an unusable one just
         // cost a full replay that "passed" and hid the problem)
         {
             int ms = m.anchorMissing, mt = m.anchorTooLate, mn = m.anchorNotListed;
-            m.verifyingAnchor = m.fastMode && anchorUsable(m, m.target().step);
+            m.verifyingAnchor = m.fastMode && anchorUsable(m, m.target().step, m.target().step);
             m.anchorMissing = ms; m.anchorTooLate = mt; m.anchorNotListed = mn; // counted per run in beginTest
         }
         if (m.verifyingAnchor) { beginTest(); return; }
