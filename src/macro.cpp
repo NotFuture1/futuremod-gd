@@ -1052,16 +1052,21 @@ void beginTest() {
             auto const& a = it->second;
             // resetLevel FIRST: it cancels any auto-respawn GD still has pending
             // from the previous probe's death; the checkpoint then overrides it.
-            // Restore = GD's own practice respawn: with exactly this checkpoint in
-            // its list, resetLevel() respawns the level AND the players at it.
-            // (loadFromCheckpoint() alone restores the level objects but leaves
-            // the player wherever the reset put it -- every restore "drifted" by
-            // thousands of units, and with CBF GD's section grid threw.)
+            // Restore: back to the level start (GD's list is always empty, so
+            // resetLevel() really starts from the start), then the level state,
+            // then EACH PLAYER's state -- PlayLayer::loadFromCheckpoint() does not
+            // move the players, which is why every restore used to "drift" by
+            // thousands of units (and with CBF made GD's section grid throw).
             auto tr = std::chrono::steady_clock::now();
-            pl->m_checkpointArray->addObject(a.cp);
             pl->resetLevel();
-            pl->m_checkpointArray->removeObject(a.cp);
-            m.perfReset += msSince(tr);
+            auto tl = std::chrono::steady_clock::now();
+            m.perfReset += std::chrono::duration<double, std::milli>(tl - tr).count();
+            pl->loadFromCheckpoint(a.cp);
+            if (pl->m_player1 && a.cp->m_player1Checkpoint)
+                pl->m_player1->loadFromCheckpoint(a.cp->m_player1Checkpoint);
+            if (pl->m_player2 && a.cp->m_player2Checkpoint)
+                pl->m_player2->loadFromCheckpoint(a.cp->m_player2Checkpoint);
+            m.perfLoad += msSince(tl);
             restoreHeld(pl->m_player1, a.p1);
             restoreHeld(pl->m_player2, a.p2);
             m.step = a.step;
@@ -1206,17 +1211,10 @@ bool pickNextRefine(Macro& m) {
 
 void finishAnalysis();
 
-// Our save-states are kept OUT of GD's checkpoint list (see beginTest), so
-// GD's own cleanup never saw them: put them back and let removeAllCheckpoints
-// tear them down properly, then drop our refs.
+// Our save-states come from createCheckpoint(): never in GD's checkpoint list,
+// no marker in the level -- dropping them is just releasing our refs.
 void dropAnchors() {
-    auto& m = Macro::get();
-    if (auto pl = PlayLayer::get(); pl && pl->m_checkpointArray) {
-        for (auto const& [i, a] : m.anchors)
-            if (a.cp && !pl->m_checkpointArray->containsObject(a.cp)) pl->m_checkpointArray->addObject(a.cp);
-        pl->removeAllCheckpoints();
-    }
-    m.anchors.clear();
+    Macro::get().anchors.clear();
 }
 
 // Set when GD threw mid-run: the level's object state can't be trusted, so it
@@ -1824,11 +1822,13 @@ class $modify(MacroBGL, GJBaseGameLayer) {
                         if (m.nextAnchorCapture > 0 && prev != m.anchors.end()
                             && prev->second.step == m.step) {
                             m.anchors[m.nextAnchorCapture] = prev->second;
-                        } else if (auto cp = plc->markCheckpoint()) {
-                            // keep it OUT of GD's list: with any checkpoint listed,
-                            // resetLevel() respawns there even in normal mode, so a
-                            // "restart from the start" would land mid-level
-                            if (plc->m_checkpointArray) plc->m_checkpointArray->removeObject(cp); // our Ref keeps it alive
+                        } else if (auto cp = plc->createCheckpoint()) {
+                            // createCheckpoint() = the saved state only: NOT added to
+                            // GD's checkpoint list (with any checkpoint listed,
+                            // resetLevel() respawns there even in normal mode) and no
+                            // marker object in the level. Taking markCheckpoint()'s
+                            // checkpoints back out of the list by hand left GD with
+                            // a dangling marker -> null deref in preUpdateVisibility.
                             Macro::Anchor a{ cp, plc->m_randomSeed, plc->m_replayRandSeed, m.step };
                             a.p1 = captureHeld(m_player1);
                             a.p2 = captureHeld(m_player2);

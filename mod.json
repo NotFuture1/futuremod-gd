@@ -5,7 +5,7 @@
         "mac": "2.2081",
         "android": "2.2081"
     },
-    "version": "v1.12.0",
+    "version": "v1.12.1",
     "id": "future.futuremod",
     "name": "Future Mod",
     "developer": "future",
@@ -68,10 +68,10 @@
             "default": true
         },
         "analyze-fast": {
-            "name": "Fast analysis",
-            "description": "Snapshots the game before each input and starts that input's test runs from there, instead of replaying the whole level every time. Analysis time then grows with the NUMBER of inputs, not with how far into the level they are, so long levels are far faster. Every snapshot is first verified by re-running it unshifted against the baseline; one that drifts is discarded and that input falls back to a full replay automatically. The 'Analysis done' popup shows how many runs used snapshots.",
+            "name": "Fast analysis (EXPERIMENTAL)",
+            "description": "EXPERIMENTAL, off by default: it has crashed the game on some levels while being fixed. Snapshots the game before each input and starts that input's test runs from there instead of replaying the whole level, so long levels are far faster. Every snapshot is first checked by re-running it unshifted; one that doesn't reproduce your run is discarded and that input uses a full replay. Off = every test run replays from the level start: slower, but never touches GD's checkpoints.",
             "type": "bool",
-            "default": true
+            "default": false
         },
         "fw-max-window": {
             "name": "Max window (frames)",
