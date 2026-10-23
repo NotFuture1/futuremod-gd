@@ -5,11 +5,11 @@
         "mac": "2.2081",
         "android": "2.2081"
     },
-    "version": "v1.15.3",
+    "version": "v1.16.0",
     "id": "future.futuremod",
     "name": "Future Mod",
     "developer": "future",
-    "description": "Frame window counter for GD: a CBF-aware macro bot that measures every click's frame window, NaN-style replay rings, frame windows on death, NaNDL comparison, plus optional cheat modules (click indicator, click practice, LDM instaswap). Also: skip level endings with a key.",
+    "description": "Frame window counter for GD: a CBF-aware macro bot that measures every click's frame window, NaN-style replay rings, frame windows on death, NaNDL comparison, plus optional cheat modules (click indicator, window extender, LDM instaswap). Also: skip level endings with a key.",
     "tags": [
         "gameplay",
         "utility"
@@ -174,19 +174,19 @@
             "type": "bool",
             "default": false
         },
-        "mod-click-practice": {
-            "name": "Click practice",
-            "description": "CHEAT. Practice only the clicks you pick (pause menu > Practice): around those, you play them yourself at their real difficulty; every other click is played by the bot from your macro, and your inputs there are ignored. Needs a recorded (and ideally analyzed) macro for the level. Marks the run as CHEATING.",
+        "mod-window-extender": {
+            "name": "Window extender",
+            "description": "CHEAT. Makes the clicks you're NOT practicing easier, so you can focus on the ones you are. You still play every click yourself: if you're early or late by at most 'Extra frames' outside a click's real frame window, the click is moved into the window and you survive; further off and you die like normal. Late clicks are caught by the game briefly holding at the window's last frame (never longer than the extra frames). Pick the clicks to practice with NO help in the pause menu > Extender. Uses the level's frame windows (analysis or import). Marks the run as CHEATING.",
             "type": "bool",
             "default": false
         },
-        "practice-margin": {
-            "name": "Practice margin (frames)",
-            "description": "How long before and after a picked click you're in control (frames, 240 = 1 s). It never reaches over the neighbouring clicks on the same button (the bot plays those), so a big value is safe.",
+        "extender-frames": {
+            "name": "Extra frames",
+            "description": "How far outside a click's window (240 Hz frames, each side) still counts as hitting it. 1-2 is a gentle assist. At low FPS without CBF, late clicks get up to one rendered frame more, because GD only sees inputs once per frame.",
             "type": "int",
-            "default": 30,
-            "min": 4,
-            "max": 120
+            "default": 2,
+            "min": 1,
+            "max": 10
         },
         "mod-ldm-swap": {
             "name": "LDM instaswap",

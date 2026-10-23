@@ -14,15 +14,6 @@
 
 namespace fw::core {
 
-// one recorded input, on the level clock
-struct BotInput {
-    double t = 0.0;
-    int button = 1;
-    bool down = true;
-    bool player1 = true;
-    int mask = 0; // players it moved (bit0 = P1, bit1 = P2); 0 = unknown
-};
-
 // The macro system is doing nothing (no record / replay / analysis): the
 // player is playing normally.
 bool idle();
@@ -34,16 +25,6 @@ double now();
 // Every frame window this level has (all analyses incl. other start positions,
 // plus imports), sorted by time.
 std::vector<fw::Timing> const& levelTimings();
-
-// The level's recorded inputs (this start position's macro, else the level's
-// full macro), sorted by time. Empty = nothing recorded.
-std::vector<BotInput> const& botInputs();
-
-// Level time where botInputs()' macro begins (its start position; 0 = start).
-double botStart();
-
-// Press / release exactly as replay does.
-void applyBotInput(GJBaseGameLayer* layer, BotInput const& in);
 
 // Level-clock time of the click you last died on (NaN = none this level).
 double lastDiedOn();

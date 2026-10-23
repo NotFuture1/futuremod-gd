@@ -8,17 +8,17 @@ on:
   workflow_dispatch:
 
 jobs:
-  # Logic that doesn't need GD (click practice engine) is tested on its own.
+  # Logic that doesn't need GD (window extender engine) is tested on its own.
   tests:
     name: Host tests
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
         uses: actions/checkout@v4
-      - name: Click practice engine
+      - name: Window extender engine
         run: |
-          g++ -std=c++20 -Wall -Wextra -I src tests/practice_test.cpp -o practice_test
-          ./practice_test
+          g++ -std=c++20 -Wall -Wextra -I src tests/assist_test.cpp -o assist_test
+          ./assist_test
 
   build:
     name: Build Windows

@@ -1,7 +1,7 @@
 #include "common.hpp"
 #include "core.hpp"
 #include "display.hpp"
-#include "practice_logic.hpp"
+#include "assist_logic.hpp"
 
 #include <Geode/Geode.hpp>
 #include <Geode/modify/GJBaseGameLayer.hpp>
@@ -22,7 +22,7 @@
 using namespace geode::prelude;
 
 // ===========================================================================
-// Cheat modules: click indicator, click practice, LDM instaswap.
+// Cheat modules: click indicator, window extender, LDM instaswap.
 //
 // All of them are cheats. While any is on, a red CHEATING label sits in the
 // bottom-right corner and the level runs in GD's test mode (like a start pos
@@ -33,9 +33,9 @@ namespace {
 
 bool macroOn() { return Mod::get()->getSettingValue<bool>("macro-enabled"); }
 bool indicatorOn() { return macroOn() && Mod::get()->getSettingValue<bool>("mod-click-indicator"); }
-bool practiceOn() { return macroOn() && Mod::get()->getSettingValue<bool>("mod-click-practice"); }
+bool extenderOn() { return macroOn() && Mod::get()->getSettingValue<bool>("mod-window-extender"); }
 bool ldmOn() { return macroOn() && Mod::get()->getSettingValue<bool>("mod-ldm-swap"); }
-bool anyCheat() { return indicatorOn() || practiceOn() || ldmOn(); }
+bool anyCheat() { return indicatorOn() || extenderOn() || ldmOn(); }
 
 // once a module was on during this level, the whole session is cheated
 bool g_cheatedSession = false;
@@ -147,137 +147,137 @@ void tickIndicator(PlayLayer* pl) {
 }
 
 // ---------------------------------------------------------------------------
-// Click practice
+// Window extender: every click you did NOT pick gets X frames of extra window
+// each side (early inputs held until the window opens; late ones caught by
+// the game waiting at the window's last frame). Picked clicks: no help. The
+// decisions live in assist_logic.hpp, tested on its own (tests/assist_test.cpp);
+// this part feeds it the level's windows and carries out what it says.
 // ---------------------------------------------------------------------------
 
-// The decisions live in practice_logic.hpp (tested on its own in
-// tests/practice_test.cpp); this part only feeds it the level's data and
-// carries out what it says.
-struct Practice {
-    std::string key;               // level the selection belongs to
-    std::vector<double> selected;  // level-clock times of picked presses
-    fw::practice::Engine engine;
-    std::string engKey;            // what the engine was built from
-    size_t engN = static_cast<size_t>(-1);
-    double engMargin = -1.0;
-    bool selDirty = true;
-    bool warned = false;           // "picks don't match" said once per level
+struct Extender {
+    std::string key;                // level the picks belong to
+    std::vector<double> picked;     // level-clock times of picked presses
+    fw::assist::Engine engine;
+    std::vector<fw::Timing> const* builtFrom = nullptr;
+    size_t builtN = static_cast<size_t>(-1);
+    double builtX = -1.0;
+    bool dirty = true;
+    bool injecting = false;         // our own re-injected inputs pass through
 };
-Practice g_prac;
+Extender g_ext;
 
-std::string selKey() { return "practice-" + fw::core::baseKey(); }
+std::string pickKey() { return "practice-" + fw::core::baseKey(); }
 
-void loadSelection() {
+void loadPicks() {
     auto key = fw::core::baseKey();
-    if (g_prac.key == key) return;
-    g_prac = Practice{};
-    g_prac.key = key;
-    std::istringstream ss(Mod::get()->getSavedValue<std::string>(selKey(), ""));
+    if (g_ext.key == key) return;
+    g_ext.key = key;
+    g_ext.picked.clear();
+    g_ext.dirty = true;
+    std::istringstream ss(Mod::get()->getSavedValue<std::string>(pickKey(), ""));
     std::string tok;
-    while (std::getline(ss, tok, ',')) if (!tok.empty()) g_prac.selected.push_back(std::strtod(tok.c_str(), nullptr));
-    std::sort(g_prac.selected.begin(), g_prac.selected.end());
+    while (std::getline(ss, tok, ',')) if (!tok.empty()) g_ext.picked.push_back(std::strtod(tok.c_str(), nullptr));
+    std::sort(g_ext.picked.begin(), g_ext.picked.end());
 }
 
-void saveSelection() {
+void savePicks() {
     std::string s;
-    for (double t : g_prac.selected) s += fmt::format("{}{:.3f}", s.empty() ? "" : ",", t);
-    Mod::get()->setSavedValue(selKey(), s);
-    g_prac.selDirty = true;
-    g_prac.warned = false;
+    for (double t : g_ext.picked) s += fmt::format("{}{:.3f}", s.empty() ? "" : ",", t);
+    Mod::get()->setSavedValue(pickKey(), s);
+    g_ext.dirty = true;
 }
 
-bool isSelected(double t) {
-    return std::any_of(g_prac.selected.begin(), g_prac.selected.end(), [&](double s) { return std::fabs(s - t) < 0.75; });
+bool isPicked(double t) {
+    return std::any_of(g_ext.picked.begin(), g_ext.picked.end(), [&](double p) { return std::fabs(p - t) < 0.75; });
 }
 
-void setSelected(double t, bool on) {
-    auto& v = g_prac.selected;
-    v.erase(std::remove_if(v.begin(), v.end(), [&](double s) { return std::fabs(s - t) < 0.75; }), v.end());
+void setPicked(double t, bool on) {
+    auto& v = g_ext.picked;
+    v.erase(std::remove_if(v.begin(), v.end(), [&](double p) { return std::fabs(p - t) < 0.75; }), v.end());
     if (on) { v.push_back(t); std::sort(v.begin(), v.end()); }
 }
 
-// keep the engine in step with the level's macro, the picks and the margin
-void syncEngine() {
-    loadSelection();
-    auto const& ins = fw::core::botInputs();
-    auto key = fw::core::baseKey();
-    if (g_prac.engKey != key || g_prac.engN != ins.size()) {
-        std::vector<fw::practice::Input> conv;
-        conv.reserve(ins.size());
-        for (auto const& b : ins) conv.push_back({ b.t, b.button, b.down, b.player1, b.mask });
-        g_prac.engine.setInputs(std::move(conv), fw::core::botStart());
-        g_prac.engKey = key;
-        g_prac.engN = ins.size();
-        g_prac.selDirty = true;
-    }
-    double margin = static_cast<double>(Mod::get()->getSettingValue<int64_t>("practice-margin"));
-    if (g_prac.selDirty || margin != g_prac.engMargin) {
-        g_prac.engine.setSelection(g_prac.selected, margin);
-        g_prac.selDirty = false;
-        g_prac.engMargin = margin;
-        if (!g_prac.selected.empty() && g_prac.engine.matched() == 0 && !g_prac.warned && !ins.empty()) {
-            g_prac.warned = true;
-            Notification::create("Click practice: your picked clicks don't match this level's macro.\n"
-                                 "Pick them again (pause menu > Practice).", NotificationIcon::Warning)->show();
+double extraFrames() { return static_cast<double>(Mod::get()->getSettingValue<int64_t>("extender-frames")); }
+
+// rebuild the engine when the level's windows, the picks or X change
+void syncExtender() {
+    loadPicks();
+    auto const& list = fw::core::levelTimings();
+    double X = extraFrames();
+    if (!g_ext.dirty && g_ext.builtFrom == &list && g_ext.builtN == list.size() && g_ext.builtX == X) return;
+    g_ext.dirty = false;
+    g_ext.builtFrom = &list;
+    g_ext.builtN = list.size();
+    g_ext.builtX = X;
+    // a picked click = its press and the release that follows it
+    std::vector<bool> skip(list.size(), false);
+    for (size_t i = 0; i < list.size(); i++) {
+        if (list[i].down == 0 || !isPicked(list[i].t)) continue;
+        skip[i] = true;
+        for (size_t j = i + 1; j < list.size(); j++) {
+            if (list[j].p2 != list[i].p2) continue;
+            if (list[j].down == 0) skip[j] = true;
+            break;
         }
     }
+    std::vector<fw::assist::Timing> help;
+    for (size_t i = 0; i < list.size(); i++) {
+        if (skip[i]) continue;
+        auto const& t = list[i];
+        help.push_back({ t.t, t.loEdge(), t.hiEdge(), t.down != 0, t.p2 });
+    }
+    g_ext.engine.setTimings(std::move(help), X);
 }
 
-bool practiceActive() {
-    if (!practiceOn() || !fw::core::idle()) return false;
-    syncEngine();
-    return g_prac.engine.active();
+bool extenderActive(GJBaseGameLayer* layer) {
+    if (!extenderOn() || !fw::core::idle()) return false;
+    auto pl = PlayLayer::get();
+    if (!pl || static_cast<GJBaseGameLayer*>(pl) != layer || !pl->m_player1 || pl->m_player1->m_isDead) return false;
+    syncExtender();
+    return g_ext.engine.active();
 }
 
-// once per physics step, at the point GD applies inputs
-void practiceStep(GJBaseGameLayer* layer) {
-    PlayerObject* ps[2] = { layer->m_player1, layer->m_player2 };
-    auto holds = [&](int button, int mask) {
-        for (int k = 0; k < 2; k++) {
-            if (!(mask & (1 << k)) || !ps[k]) continue;
-            auto it = ps[k]->m_holdingButtons.find(button);
-            if (it != ps[k]->m_holdingButtons.end() && it->second) return true;
-        }
-        return false;
+// press / release exactly as GD would for a real input on that player
+void injectInput(GJBaseGameLayer* layer, bool down, bool p2) {
+    auto pl = PlayLayer::get();
+    bool twoP = pl && pl->m_levelSettings && pl->m_levelSettings->m_twoPlayerMode;
+    bool dual = layer->m_gameState.m_isDualMode;
+    auto act = [&](PlayerObject* p) {
+        if (!p) return;
+        if (down) p->pushButton(PlayerButton::Jump);
+        else p->releaseButton(PlayerButton::Jump);
     };
-    auto out = g_prac.engine.step(fw::core::now(), holds);
-    for (size_t i : out.apply) {
-        auto const& in = g_prac.engine.input(i);
-        fw::core::applyBotInput(layer, { in.t, in.button, in.down, in.player1, in.mask });
+    if (twoP) act(p2 ? layer->m_player2 : layer->m_player1);
+    else {
+        act(layer->m_player1);
+        if (dual) act(layer->m_player2);
     }
-    for (auto const& r : out.release)
-        for (int k = 0; k < 2; k++)
-            if ((r.mask & (1 << k)) && ps[k]) ps[k]->releaseButton(static_cast<PlayerButton>(r.button));
 }
 
-// The picker: every recorded press with its window; tick the ones to practice.
+// The picker: every click in the level with its window; tick the ones to
+// practice WITHOUT help (everything else gets the extender's help).
 class PracticePopup : public geode::Popup {
-    struct Row { double t; int n; double w; bool hasW; };
+    struct Row { double t; int n; double w; };
     std::vector<Row> m_rows;
     std::vector<CCMenuItemToggler*> m_toggles;
     CCLabelBMFont* m_count = nullptr;
 
     bool init() {
         if (!Popup::init(400.f, 270.f)) return false;
-        this->setTitle("Click practice");
-        loadSelection();
+        this->setTitle("Window extender: clicks to practice");
+        loadPicks();
 
-        auto const& ins = fw::core::botInputs();
-        auto const& wins = fw::core::levelTimings();
         int n = 0;
-        for (auto const& in : ins) {
-            if (!in.down) continue;
-            n++;
-            Row r{ in.t, n, 0.0, false };
-            for (auto const& w : wins)
-                if (std::fabs(w.t - in.t) < 0.75 && w.p2 == !in.player1) { r.w = w.w; r.hasW = true; break; }
-            m_rows.push_back(r);
+        for (auto const& w : fw::core::levelTimings()) {
+            if (w.down == 0) continue; // releases follow their press
+            m_rows.push_back({ w.t, ++n, w.w });
         }
 
         auto size = m_mainLayer->getContentSize();
         if (m_rows.empty()) {
-            auto l = CCLabelBMFont::create("Record (and analyze) this level first.", "bigFont.fnt");
+            auto l = CCLabelBMFont::create("No frame windows for this level yet:\nanalyze it, or Import a file.", "bigFont.fnt");
             l->setScale(0.4f);
+            l->setAlignment(kCCTextAlignmentCenter);
             l->setPosition(size / 2.f);
             m_mainLayer->addChild(l);
             return true;
@@ -299,20 +299,19 @@ class PracticePopup : public geode::Popup {
             auto tog = CCMenuItemToggler::createWithStandardSprites(this, menu_selector(PracticePopup::onToggle), 0.55f);
             tog->setTag(static_cast<int>(i));
             tog->setPosition({ 20.f, y });
-            tog->toggle(isSelected(r.t));
+            tog->toggle(isPicked(r.t));
             menu->addChild(tog);
             m_toggles.push_back(tog);
-            auto l = CCLabelBMFont::create(fmt::format("#{}   {:.2f}s   {}", r.n, r.t / 240.0,
-                r.hasW ? fw::display::windowText(r.w) + "f" : std::string("not analyzed")).c_str(), "bigFont.fnt");
+            auto l = CCLabelBMFont::create(fmt::format("#{}   {:.2f}s   {}f", r.n, r.t / 240.0,
+                fw::display::windowText(r.w)).c_str(), "bigFont.fnt");
             l->setScale(0.38f);
             l->setAnchorPoint({ 0.f, 0.5f });
             l->setPosition({ 40.f, y });
-            if (r.hasW && r.w <= 2.0 + 1e-9) l->setColor({ 255, 120, 120 });
+            l->setColor(fw::display::windowColour(r.w));
             menu->addChild(l);
         }
         scroll->scrollToTop();
 
-        // quick picks
         auto quick = CCMenu::create();
         auto add = [&](char const* text, SEL_MenuHandler sel) {
             auto spr = ButtonSprite::create(text, "bigFont.fnt", "GJ_button_04.png", 0.6f);
@@ -329,7 +328,7 @@ class PracticePopup : public geode::Popup {
         m_mainLayer->addChild(quick);
 
         m_count = CCLabelBMFont::create(" ", "goldFont.fnt");
-        m_count->setScale(0.45f);
+        m_count->setScale(0.42f);
         m_count->setPosition({ size.width / 2.f, 12.f });
         m_mainLayer->addChild(m_count);
         refresh();
@@ -337,22 +336,22 @@ class PracticePopup : public geode::Popup {
     }
 
     void refresh() {
-        for (size_t i = 0; i < m_toggles.size(); i++) m_toggles[i]->toggle(isSelected(m_rows[i].t));
-        if (m_count) m_count->setString(fmt::format("{} of {} clicks picked - the bot plays the rest",
-            g_prac.selected.size(), m_rows.size()).c_str());
-        saveSelection();
+        for (size_t i = 0; i < m_toggles.size(); i++) m_toggles[i]->toggle(isPicked(m_rows[i].t));
+        if (m_count) m_count->setString(fmt::format("{} picked (no help) - the other {} get +-{} frames",
+            g_ext.picked.size(), m_rows.size() - std::min(m_rows.size(), g_ext.picked.size()),
+            static_cast<int>(extraFrames())).c_str());
+        savePicks();
     }
 
     void onToggle(CCObject* sender) {
         auto i = static_cast<size_t>(static_cast<CCNode*>(sender)->getTag());
         if (i >= m_rows.size()) return;
-        // the toggler flips after this callback: read the current state, invert
-        setSelected(m_rows[i].t, !isSelected(m_rows[i].t));
+        setPicked(m_rows[i].t, !isPicked(m_rows[i].t));
         Loader::get()->queueInMainThread([self = Ref(this)] { self->refresh(); });
     }
     void pickTight(double maxW) {
-        g_prac.selected.clear();
-        for (auto const& r : m_rows) if (r.hasW && r.w <= maxW + 1e-9) g_prac.selected.push_back(r.t);
+        g_ext.picked.clear();
+        for (auto const& r : m_rows) if (r.w <= maxW + 1e-9) g_ext.picked.push_back(r.t);
         refresh();
     }
     void onTight1(CCObject*) { pickTight(1.0); }
@@ -364,13 +363,12 @@ class PracticePopup : public geode::Popup {
             Notification::create("No death on a timing yet this level", NotificationIcon::Info)->show();
             return;
         }
-        // the died-on timing may be a release: pick its press
-        double best = NAN;
+        double best = NAN; // the died-on timing may be a release: pick its press
         for (auto const& r : m_rows) if (r.t <= d + 0.75) best = r.t;
-        if (!std::isnan(best)) setSelected(best, true);
+        if (!std::isnan(best)) setPicked(best, true);
         refresh();
     }
-    void onClear(CCObject*) { g_prac.selected.clear(); refresh(); }
+    void onClear(CCObject*) { g_ext.picked.clear(); refresh(); }
 
 public:
     static PracticePopup* create() {
@@ -618,18 +616,46 @@ class $modify(FwModBGL, GJBaseGameLayer) {
         else hideIndicators(pl);
     }
 
+    static void onModify(auto& self) {
+        // inside Click Between Frames' hook (VeryEarly): CBF then sees our
+        // step count, and the input queue it drains is still there for us
+        (void)self.setHookPriority("GJBaseGameLayer::getModifiedDelta", Priority::Late);
+    }
+
+    // Window extender: how many physics steps run this frame. Holding the
+    // game at a window's last good frame (0 steps, time dropped) is how a
+    // late input can still land in the window.
+    double getModifiedDelta(float dt) {
+        double mod = GJBaseGameLayer::getModifiedDelta(dt);
+        if (!extenderActive(this)) return mod;
+        double stepLen = std::max(m_gameState.m_timeWarp, 1.f) / 240.0;
+        int n = static_cast<int>(std::lround(mod / stepLen));
+        std::vector<fw::assist::Queued> queued;
+        for (auto const& q : m_queuedButtons)
+            if (q.m_button == PlayerButton::Jump) queued.push_back({ q.m_isPush, q.m_isPlayer2 });
+        auto plan = g_ext.engine.plan(static_cast<long long>(std::llround(fw::core::now())), n,
+            static_cast<double>(dt) * 240.0, queued);
+        if (plan.steps >= n) return mod;
+        if (plan.carry) m_extraDelta += (n - plan.steps) * stepLen;
+        return plan.steps * stepLen;
+    }
+
+    // held-back inputs come back at the step they're due
     void processQueuedButtons(float dt, bool clearQueue) {
-        auto pl = PlayLayer::get();
-        if (pl && static_cast<GJBaseGameLayer*>(pl) == this && practiceActive()) practiceStep(this);
+        if (extenderActive(this)) {
+            for (auto const& inj : g_ext.engine.due(static_cast<long long>(std::llround(fw::core::now())))) {
+                g_ext.injecting = true;
+                injectInput(this, inj.down, inj.p2);
+                g_ext.injecting = false;
+            }
+        }
         GJBaseGameLayer::processQueuedButtons(dt, clearQueue);
     }
 
     void handleButton(bool down, int button, bool isPlayer1) {
-        // click practice: outside your picked clicks the bot plays; ignore you
-        auto pl = PlayLayer::get();
-        if (pl && static_cast<GJBaseGameLayer*>(pl) == this && practiceActive()
-            && !g_prac.engine.allowPlayer(fw::core::now(), button, isPlayer1))
-            return;
+        if (!g_ext.injecting && button == static_cast<int>(PlayerButton::Jump) && extenderActive(this)
+            && !g_ext.engine.onInput(static_cast<long long>(std::llround(fw::core::now())), down, !isPlayer1))
+            return; // held back: due() brings it back inside the window
         GJBaseGameLayer::handleButton(down, button, isPlayer1);
     }
 };
@@ -639,7 +665,7 @@ class $modify(FwModPlayLayer, PlayLayer) {
         g_cheatedSession = false;
         if (!PlayLayer::init(level, useReplay, dontCreateObjects)) return false;
         markCheating(this);
-        g_prac.engine.reset();
+        g_ext.engine.reset();
         // LDM swap: back on the start position you were on
         if (g_swap.wantStartPos) {
             auto want = *g_swap.wantStartPos;
@@ -667,9 +693,7 @@ class $modify(FwModPlayLayer, PlayLayer) {
     void resetLevel() {
         PlayLayer::resetLevel();
         markCheating(this);
-        // every reset/respawn: the bot re-seeks to where you are (forgetting
-        // this made it skip everything before your last death -> no inputs)
-        g_prac.engine.reset();
+        g_ext.engine.reset(); // new attempt: clicks behind you are done
     }
 };
 
@@ -684,10 +708,10 @@ class $modify(FwModLevel, GJGameLevel) {
 class $modify(FwModPause, PauseLayer) {
     void customSetup() {
         PauseLayer::customSetup();
-        if (!practiceOn() && !ldmOn()) return;
+        if (!extenderOn() && !ldmOn()) return;
         auto menu = CCMenu::create();
-        if (practiceOn()) {
-            auto spr = ButtonSprite::create("Practice");
+        if (extenderOn()) {
+            auto spr = ButtonSprite::create("Extender");
             spr->setScale(0.6f);
             menu->addChild(CCMenuItemSpriteExtra::create(spr, this, menu_selector(FwModPause::onPractice)));
         }

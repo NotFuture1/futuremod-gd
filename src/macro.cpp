@@ -1961,45 +1961,6 @@ double now() { return attemptNow(); }
 
 std::vector<fw::Timing> const& levelTimings() { return ::levelTimings(); }
 
-static double g_botStart = 0.0;
-
-std::vector<BotInput> const& botInputs() {
-    static std::vector<BotInput> cache;
-    static std::string cacheKey;
-    static size_t cacheN = static_cast<size_t>(-1);
-    auto& m = Macro::get();
-    if (cacheKey == m.curKey && cacheN == m.inputs.size()) return cache;
-    cacheKey = m.curKey;
-    cacheN = m.inputs.size();
-    cache.clear();
-    auto fill = [](Macro const& src) {
-        g_botStart = src.levelT0;
-        for (auto const& in : src.inputs)
-            cache.push_back({ in.t() + src.levelT0, in.button, in.down, in.player1, in.mask });
-    };
-    if (!m.inputs.empty()) {
-        fill(m);
-    } else if (baseKeyOf(m.curKey) != m.curKey) {
-        // on a start position without its own macro: the level's full one
-        Macro full;
-        full.loadForLevel(baseKeyOf(m.curKey));
-        fill(full);
-    }
-    std::stable_sort(cache.begin(), cache.end(), [](BotInput const& a, BotInput const& b) { return a.t < b.t; });
-    return cache;
-}
-
-double botStart() { botInputs(); return g_botStart; }
-
-void applyBotInput(GJBaseGameLayer* layer, BotInput const& in) {
-    InputEdge e;
-    e.button = in.button;
-    e.down = in.down;
-    e.player1 = in.player1;
-    e.mask = in.mask;
-    applyInput(layer, e);
-}
-
 double lastDiedOn() { return g_lastDiedOn; }
 
 std::string baseKey() { return baseKeyOf(Macro::get().curKey); }
@@ -2601,7 +2562,7 @@ class $modify(MacroPlayLayer, PlayLayer) {
         m.anchors.clear(); // never keep checkpoint refs from another level
         g_levelCorrupt = false;
         g_path[0].clear(); g_path[1].clear();
-        g_attemptInit = false;
+        startAttempt(this); // the level clock starts fresh (not the last level's)
         g_lastDiedOn = std::numeric_limits<double>::quiet_NaN();
         g_deathShown = false;
         resetSplit();
