@@ -438,29 +438,52 @@ std::string decodeLevel(gd::string const& s) {
     return raw.empty() ? std::string(s) : raw;
 }
 
-// object strings ("1,31,2,x,3,y,...") of every start position in a level string
-std::vector<std::string> startPosObjects(std::string const& raw) {
-    std::vector<std::string> out;
-    size_t pos = raw.find(';'); // skip the level header
+// is this object string ("1,31,2,x,3,y,...") a start position (object id 31)?
+bool isStartPos(std::string const& obj) {
+    // key/value pairs separated by commas; key "1" = object id
+    size_t i = 0;
+    while (i < obj.size()) {
+        size_t c1 = obj.find(',', i);
+        if (c1 == std::string::npos) return false;
+        size_t c2 = obj.find(',', c1 + 1);
+        auto key = obj.substr(i, c1 - i);
+        auto val = obj.substr(c1 + 1, (c2 == std::string::npos ? obj.size() : c2) - c1 - 1);
+        if (key == "1") return val == "31";
+        if (c2 == std::string::npos) return false;
+        i = c2 + 1;
+    }
+    return false;
+}
+
+// split a decoded level string into its header and object strings
+void splitLevel(std::string const& raw, std::string& header, std::vector<std::string>& objs) {
+    objs.clear();
+    size_t pos = raw.find(';');
+    header = raw.substr(0, pos);
     while (pos != std::string::npos && pos + 1 < raw.size()) {
         size_t end = raw.find(';', pos + 1);
         auto obj = raw.substr(pos + 1, end == std::string::npos ? std::string::npos : end - pos - 1);
-        if (obj.rfind("1,31,", 0) == 0) out.push_back(obj);
+        if (!obj.empty()) objs.push_back(obj);
         pos = end;
     }
-    return out;
 }
 
+// The LDM/ULDM copy: the target level with ALL of its start positions removed
+// and replaced by the ones of the level you're on (your full-detail version),
+// so every start pos you use is there, at the same spots.
 GJGameLevel* buildCopy(GJGameLevel* from, GJGameLevel* target) {
-    auto raw = decodeLevel(target->m_levelString);
-    auto existing = startPosObjects(raw);
-    int added = 0;
-    for (auto const& sp : startPosObjects(decodeLevel(from->m_levelString))) {
-        if (std::find(existing.begin(), existing.end(), sp) != existing.end()) continue;
-        if (!raw.empty() && raw.back() != ';') raw += ';';
-        raw += sp + ';';
-        added++;
+    std::string header, srcHeader;
+    std::vector<std::string> objs, srcObjs;
+    splitLevel(decodeLevel(target->m_levelString), header, objs);
+    splitLevel(decodeLevel(from->m_levelString), srcHeader, srcObjs);
+    std::string raw = header + ";";
+    int removed = 0, added = 0;
+    for (auto const& o : objs) {
+        if (isStartPos(o)) { removed++; continue; }
+        raw += o + ";";
     }
+    for (auto const& o : srcObjs)
+        if (isStartPos(o)) { raw += o + ";"; added++; }
     auto lvl = GJGameLevel::create();
     lvl->m_levelName = target->m_levelName;
     lvl->m_levelString = ZipUtils::compressString(raw, false, 0);
@@ -470,8 +493,10 @@ GJGameLevel* buildCopy(GJGameLevel* from, GJGameLevel* target) {
     lvl->m_sfxIDs = target->m_sfxIDs;
     lvl->m_twoPlayerMode = target->m_twoPlayerMode;
     lvl->m_levelType = GJLevelType::Editor; // a local copy: nothing saved to the online level
-    FW_LOG("LDM swap -> '{}' (+{} start positions from '{}')", std::string(target->m_levelName), added,
-        std::string(from->m_levelName));
+    FW_LOG("LDM swap -> '{}': removed {} of its start positions, added {} from '{}' ({} objects)",
+        std::string(target->m_levelName), removed, added, std::string(from->m_levelName), objs.size());
+    if (added == 0)
+        Notification::create("The level you're on has no start positions to carry over", NotificationIcon::Info)->show();
     return lvl;
 }
 
@@ -493,6 +518,11 @@ void swapLevel() {
         auto target = resolveTarget(spec);
         if (!target) {
             Notification::create("Couldn't find the bound level. If it's online, open it once so it's downloaded.",
+                NotificationIcon::Error)->show();
+            return;
+        }
+        if (std::string(target->m_levelString).empty()) {
+            Notification::create("The bound level isn't downloaded yet: open it once (play it), then swap.",
                 NotificationIcon::Error)->show();
             return;
         }
@@ -637,6 +667,7 @@ class $modify(FwModPlayLayer, PlayLayer) {
                         found = static_cast<StartPosObject*>(obj);
                         break;
                     }
+            FW_LOG("LDM swap: start pos at ({:.0f}, {:.0f}) {}", want.x, want.y, found ? "found" : "NOT found");
             if (found) {
                 Loader::get()->queueInMainThread([self = Ref(this), found] {
                     if (PlayLayer::get() != self.data()) return;
