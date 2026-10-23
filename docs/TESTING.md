@@ -1,4 +1,4 @@
-# Testing the frame window counter (v1.14.0)
+# Testing the frame window counter (v1.15.0)
 
 Do the tests in order. Each one tells you what to look for, what counts as a
 pass, and what to send back. Everything the mod reports goes to `geode.log`
@@ -187,6 +187,27 @@ If there's no sound, try **Sound file** = `playSound_01.ogg` in settings.
    Record (J) + analyze (N) from the start pos: it gets its own macro, and the
    log shows `[fw] LEVELCLOCK recording from start pos x ... = level frame ...`
    (that frame / 240 should be about the seconds into the level the start pos is).
+
+---
+
+## Step 4e: Cheat modules (v1.15.0)
+
+Settings > **Cheat modules**. With any of them on, a red **CHEATING** label is in
+the bottom-right corner and the run doesn't save progress.
+
+1. **Click indicator**: on an analyzed level, play normally. A yellow ring
+   shrinks onto a white one above your icon as each click comes up, and it
+   turns green with `CLICK` / `RELEASE` while you're inside its window.
+2. **Click practice**: needs a recorded macro for the level. Pause menu >
+   **Practice**: tick clicks (or 1f / 2f / 4f / Died on). Play: the bot does
+   every other click and ignores your inputs there; around each picked click
+   you're in control.
+3. **LDM instaswap**: pause menu > **LDM**: type the LDM version's level ID
+   (open it once first so GD has it) or a local level's exact name > Bind.
+   Press **F6** in the level: it swaps instantly, keeping your start positions
+   and the one you're on. F6 again swaps back.
+
+Log lines: `[fw] LDM swap -> ...`.
 
 ---
 

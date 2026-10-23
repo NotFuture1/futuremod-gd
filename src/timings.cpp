@@ -67,6 +67,12 @@ Result<std::vector<fw::Timing>> readJson(std::filesystem::path const& path) {
         t.w = w;
         t.p2 = row.contains("isPlayer2") && row["isPlayer2"].asBool().unwrapOr(false);
         t.input = static_cast<int>(row["input"].asDouble().unwrapOr(static_cast<double>(n)));
+        // our own extra fields (ignored by NaNDL): exact edges, press/release
+        if (row.contains("lo") && row.contains("hi")) {
+            t.lo = row["lo"].asDouble().unwrapOr(std::nan(""));
+            t.hi = row["hi"].asDouble().unwrapOr(std::nan(""));
+        }
+        if (row.contains("press")) t.down = row["press"].asBool().unwrapOr(true) ? 1 : 0;
         out.push_back(t);
     }
     return Ok(out);
@@ -145,8 +151,11 @@ std::string toNandlJson(std::vector<Timing> const& list) {
     for (size_t k = 0; k < list.size(); k++) {
         auto const& t = list[k];
         if (k) rows += ",\n";
-        rows += fmt::format("    {{ \"input\": {}, \"timePosition\": {}, \"frameWindow\": {}, \"isPlayer2\": {} }}",
-            t.input > 0 ? t.input : static_cast<int>(k) + 1, num(t.t), num(t.w), t.p2 ? "true" : "false");
+        std::string extra;
+        if (!std::isnan(t.lo) && !std::isnan(t.hi)) extra += fmt::format(", \"lo\": {}, \"hi\": {}", num(t.lo), num(t.hi));
+        if (t.down >= 0) extra += fmt::format(", \"press\": {}", t.down ? "true" : "false");
+        rows += fmt::format("    {{ \"input\": {}, \"timePosition\": {}, \"frameWindow\": {}, \"isPlayer2\": {}{} }}",
+            t.input > 0 ? t.input : static_cast<int>(k) + 1, num(t.t), num(t.w), t.p2 ? "true" : "false", extra);
     }
     return fmt::format(
         "{{\n  \"format\": \"nandl-calculator\",\n  \"version\": 1,\n"

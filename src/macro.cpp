@@ -3,6 +3,7 @@
 #include "display.hpp"
 #include "nandl.hpp"
 #include "timings.hpp"
+#include "core.hpp"
 
 #include <Geode/Geode.hpp>
 #include <Geode/modify/GJBaseGameLayer.hpp>
@@ -426,7 +427,9 @@ struct Macro {
             if (sw.idx < 0 || sw.idx >= static_cast<int>(inputs.size())) continue;
             if (sw.status == static_cast<char>(WStatus::Wide) || sw.window <= 0.0) continue;
             auto const& in = inputs[sw.idx];
-            out.push_back({ in.t() + levelT0, sw.window, !in.player1, sw.idx + 1 });
+            fw::Timing t{ in.t() + levelT0, sw.window, !in.player1, sw.idx + 1 };
+            t.lo = sw.lo; t.hi = sw.hi; t.down = in.down ? 1 : 0;
+            out.push_back(t);
         }
         if (fromAnalysis) *fromAnalysis = !out.empty();
         if (out.empty()) out = imported;
@@ -660,9 +663,9 @@ void updateHud() {
     auto pl = PlayLayer::get();
     if (!pl) return;
 
-    bool s240 = Mod::get()->getSettingValue<bool>("show-240");
-    bool s120 = Mod::get()->getSettingValue<bool>("show-120");
-    bool s60  = Mod::get()->getSettingValue<bool>("show-60");
+    bool s240 = fw::dev<bool>("show-240", true);
+    bool s120 = fw::dev<bool>("show-120", false);
+    bool s60  = fw::dev<bool>("show-60", false);
     if (!s240 && !s120 && !s60) s240 = true;
 
     std::string s;
@@ -1084,7 +1087,7 @@ void beginTest() {
         if (!m.shiftT.empty()) after = std::max(after, m.movedLastIdx);
         int shifted = static_cast<int>(std::floor(m.target().t() + m.offset + 1e-9));
         if (!m.shiftT.empty()) shifted = std::max(shifted, m.movedLast);
-        if (Mod::get()->getSettingValue<bool>("fw-classic-horizon")) {
+        if (fw::dev<bool>("classic-horizon", false)) {
             // v1.5 rule: until the next input of any kind, at least 24 ticks
             int nextStep = (after + 1 < m.inputs.size()) ? m.inputs[after + 1].step
                                                          : tstep + kMaxHorizon;
@@ -1219,7 +1222,7 @@ bool pickNextInteger(Macro& m) {
         m.farState = 3;
         m.farA = (m.maxWindow + 1) / 2;
         m.farB = m.maxWindow - m.farA; // farA + farB + 1 > maxWindow
-        if (Mod::get()->getSettingValue<bool>("fw-wide-shortcut")
+        if (fw::dev<bool>("wide-shortcut", true)
             && m.farB > m.maxSurv && -m.farA >= m.negLimit - 1e-9 && m.farB <= m.posLimit + 1e-9) {
             // the far edges, then halfway back on each side: a "wide" verdict
             // then needs a 1-frame death pocket hiding between checked frames
@@ -1441,9 +1444,15 @@ void writeExports() {
             (in.t() + m.levelT0) / 240.0, sw.window, opt(sw.lo), opt(sw.hi), statusName(st), optI(sw.tap), optI(sw.sub));
         bool wide = st == WStatus::Wide;
         std::string win = wide ? "\"-\"" : fmtNum(sw.window);
+        // lo/hi/press are our own extras (exact edges): NaNDL ignores them,
+        // our importer and the cheat modules use them
+        std::string extra;
+        if (!wide && !std::isnan(sw.lo) && !std::isnan(sw.hi))
+            extra = fmt::format(", \"lo\": {}, \"hi\": {}", fmtNum(sw.lo), fmtNum(sw.hi));
+        extra += fmt::format(", \"press\": {}", in.down ? "true" : "false");
         auto row = [&](size_t n) {
-            return fmt::format("    {{ \"input\": {}, \"timePosition\": {}, \"frameWindow\": {}, \"isPlayer2\": {} }}",
-                n, fmtNum(in.t() + m.levelT0), win, in.player1 ? "false" : "true");
+            return fmt::format("    {{ \"input\": {}, \"timePosition\": {}, \"frameWindow\": {}, \"isPlayer2\": {}{} }}",
+                n, fmtNum(in.t() + m.levelT0), win, in.player1 ? "false" : "true", extra);
         };
         rowsAll.push_back(row(rowsAll.size() + 1));
         if (!wide) rowsFwc.push_back(row(rowsFwc.size() + 1));
@@ -1518,7 +1527,7 @@ void finishAnalysis() {
         FW_LOG("fast mode: {} probes from a save-state, {} full replays", m.nAnchored, m.nFull);
     auto hist = fw::nandl::histogram(m.measuredWindows());
     FW_LOG("SUMMARY NaNDL-format [{}] rule={}", fw::nandl::fmtHist(hist),
-        Mod::get()->getSettingValue<bool>("fw-classic-horizon") ? "classic" : "correcting-input");
+        fw::dev<bool>("classic-horizon", false) ? "classic" : "correcting-input");
     if (auto pl = PlayLayer::get(); pl && pl->m_level && Mod::get()->getSettingValue<bool>("nandl-compare"))
         fw::nandl::compare(std::string(pl->m_level->m_levelName), hist, true);
 
@@ -1726,14 +1735,18 @@ void startAnalysis() {
     m.tightest = 1e9;
     m.nAnchored = m.nFull = 0;
     m.offset = 0.0;
-    m.speed = std::max(1.f, static_cast<float>(settingInt("analyze-speed")));
+    // speed-up: always tried at 32x and halved automatically until it
+    // reproduces the 1x run exactly (dev override: "dev-analyze-speed")
+    m.speed = static_cast<float>(std::clamp<int64_t>(fw::dev<int64_t>("analyze-speed", 32), 1, 64));
     m.speedPhase = false;
     setAnalyzeSpeed(1.f); // the first baseline always verifies at 1x
     int cps = pl->m_checkpointArray ? pl->m_checkpointArray->count() : 0;
     FW_LOG("ANALYZE start inputs={} targets={} midStep={} cbf={} maxWindow={} subframeSteps={} releases={} checkpoints={} (clearing)",
         m.inputs.size(), m.targets.size(), nMid, m.cbfMacro ? 1 : 0, m.maxWindow, m.subSteps, alsoReleases ? 1 : 0, cps);
     pl->removeAllCheckpoints();
-    m.fastMode = Mod::get()->getSettingValue<bool>("analyze-fast");
+    // save-state analysis: experimental, has crashed on some levels -> off
+    // unless enabled in saved data ("dev-analyze-fast": true)
+    m.fastMode = fw::dev<bool>("analyze-fast", false);
     if (m.fastMode && pl->m_isPracticeMode) {
         // practice restarts-from-start clear GD's checkpoint list = no save-states
         m.fastMode = false;
@@ -1786,15 +1799,19 @@ std::vector<CCPoint> g_path[2]; // object-layer positions by level-clock frame (
 bool g_deathShown = false;
 // this attempt on the level clock: where it started + steps since
 double g_attemptT0 = 0.0;
-long g_attemptSteps = 0;
+double g_attemptTime = 0.0; // game seconds since the attempt began (summed step dt)
 bool g_attemptInit = false;
+double g_lastDiedOn = std::numeric_limits<double>::quiet_NaN();
 
-double attemptNow() { return g_attemptT0 + static_cast<double>(g_attemptSteps); }
+// Same convention as the macro's m.step: summed step time, not a call count.
+// (Counting calls drifts with speedhack/time warp -- GD runs a slowed game
+// second in more, smaller steps -- and put deaths on the wrong click.)
+double attemptNow() { return g_attemptT0 + static_cast<double>(std::llround(g_attemptTime * 240.0)); }
 
 // a new attempt began (reset / respawn): from the level start the clock is 0;
 // from a start pos or a practice checkpoint, it's that spot's level time
 void startAttempt(PlayLayer* pl) {
-    g_attemptSteps = 0;
+    g_attemptTime = 0.0;
     g_attemptInit = true;
     bool fromStart = !pl->m_startPosObject
         && !(pl->m_checkpointArray && pl->m_checkpointArray->count() > 0);
@@ -1861,16 +1878,6 @@ std::optional<CCPoint> pathAt(bool p2, double t) {
     return std::nullopt;
 }
 
-std::string histLine(std::vector<fw::Timing> const& list) {
-    std::map<int, int> bins;
-    for (auto const& t : list) bins[std::max(0, static_cast<int>(std::floor(t.w + 1e-9)))]++;
-    std::string s;
-    for (auto const& [b, n] : bins) {
-        if (!s.empty()) s += "   ";
-        s += fmt::format("{}-{}f: {}", b, b + 1, n);
-    }
-    return s;
-}
 
 void showNandlFallback(PlayLayer* pl, float secs) {
     std::string name = pl->m_level ? std::string(pl->m_level->m_levelName) : std::string();
@@ -1903,7 +1910,7 @@ void showNandlFallback(PlayLayer* pl, float secs) {
 void onDeath(PlayLayer* pl, PlayerObject* who) {
     auto mode = deathMode();
     bool all = mode == "All";
-    float secs = static_cast<float>(Mod::get()->getSettingValue<double>("death-windows-seconds"));
+    constexpr float secs = 4.f; // only the NaNDL fallback shows text
     auto& m = Macro::get();
     auto const& list = levelTimings();
     if (list.empty()) { showNandlFallback(pl, secs); return; }
@@ -1911,13 +1918,15 @@ void onDeath(PlayLayer* pl, PlayerObject* who) {
     bool p2 = who && who == pl->m_player2;
     double D = attemptNow();
     constexpr double kTol = 2.0; // a click a hair after the death tick still counts
-    // the click you died on: the last timing (of the player that died, if it
-    // has any) at or just before the death
+    // The click you died on: the latest timing (of the player that died, if
+    // it has any) whose window had OPENED by the death. Missing a click late
+    // kills you after its window closed, which is still after it opened; the
+    // next click's window usually hasn't opened yet.
     bool anyForPlayer = std::any_of(list.begin(), list.end(), [&](fw::Timing const& t) { return t.p2 == p2; });
     int died = -1, passed = 0;
     for (int i = 0; i < static_cast<int>(list.size()); i++) {
-        if (list[i].t > D + kTol) break;
-        passed++;
+        if (list[i].t + list[i].loEdge() > D + kTol) continue;
+        passed = i + 1;
         if (!anyForPlayer || list[i].p2 == p2) died = i;
     }
 
@@ -1930,15 +1939,8 @@ void onDeath(PlayLayer* pl, PlayerObject* who) {
         if (pos) rings.push_back({ *pos, list[i].w, i == died });
     }
 
-    std::vector<std::string> lines;
-    if (died >= 0)
-        lines.push_back(fmt::format("Died on a {}f timing", fw::display::windowText(list[died].w)));
-    else
-        lines.push_back("Died before the first timing");
-    lines.push_back(fmt::format("{}{} of {} timings passed",
-        died >= 0 ? fmt::format("click #{}  -  ", list[died].input) : std::string(), passed, list.size()));
-    if (all) lines.push_back(histLine(list));
-    fw::display::showDeath(pl, rings, lines, secs);
+    if (died >= 0) g_lastDiedOn = list[died].t;
+    fw::display::showDeath(pl, rings, {}, secs); // just the ring(s), no info box
     FW_LOG("DEATH levelStep={:.0f} diedOn={} window={} passed={}/{}", D, died >= 0 ? list[died].input : -1,
         died >= 0 ? list[died].w : -1.0, passed, list.size());
 }
@@ -1950,6 +1952,54 @@ void onDeath(PlayLayer* pl, PlayerObject* who) {
 namespace fw {
 bool macroBusy() { return Macro::get().mode != Mode::Idle; }
 } // namespace fw
+
+namespace fw::core {
+
+bool idle() { return Macro::get().mode == Mode::Idle; }
+
+double now() { return attemptNow(); }
+
+std::vector<fw::Timing> const& levelTimings() { return ::levelTimings(); }
+
+std::vector<BotInput> const& botInputs() {
+    static std::vector<BotInput> cache;
+    static std::string cacheKey;
+    static size_t cacheN = static_cast<size_t>(-1);
+    auto& m = Macro::get();
+    if (cacheKey == m.curKey && cacheN == m.inputs.size()) return cache;
+    cacheKey = m.curKey;
+    cacheN = m.inputs.size();
+    cache.clear();
+    auto fill = [](Macro const& src) {
+        for (auto const& in : src.inputs)
+            cache.push_back({ in.t() + src.levelT0, in.button, in.down, in.player1, in.mask });
+    };
+    if (!m.inputs.empty()) {
+        fill(m);
+    } else if (baseKeyOf(m.curKey) != m.curKey) {
+        // on a start position without its own macro: the level's full one
+        Macro full;
+        full.loadForLevel(baseKeyOf(m.curKey));
+        fill(full);
+    }
+    std::stable_sort(cache.begin(), cache.end(), [](BotInput const& a, BotInput const& b) { return a.t < b.t; });
+    return cache;
+}
+
+void applyBotInput(GJBaseGameLayer* layer, BotInput const& in) {
+    InputEdge e;
+    e.button = in.button;
+    e.down = in.down;
+    e.player1 = in.player1;
+    e.mask = in.mask;
+    applyInput(layer, e);
+}
+
+double lastDiedOn() { return g_lastDiedOn; }
+
+std::string baseKey() { return baseKeyOf(Macro::get().curKey); }
+
+} // namespace fw::core
 
 // ---------------------------------------------------------------------------
 class $modify(MacroBGL, GJBaseGameLayer) {
@@ -2025,15 +2075,17 @@ class $modify(MacroBGL, GJBaseGameLayer) {
             m.gameTime += dt;
             m.step = static_cast<int>(std::llround(m.gameTime * 240.0));
         }
-        GJBaseGameLayer::processCommands(dt, isHalfTick, isLastTick);
-
+        PlayLayer* pcPl = nullptr;
         if ((m.mode == Mode::Idle || m.mode == Mode::Recording) && !fw::ghost::isSim()) {
             if (auto pl = PlayLayer::get(); pl && static_cast<GJBaseGameLayer*>(pl) == this) {
+                pcPl = pl;
                 if (!g_attemptInit) startAttempt(pl);
-                g_attemptSteps++;
-                if (deathMode() != "Off") recordPath(pl);
+                g_attemptTime += dt; // this step's number on the level clock, like m.step
             }
         }
+        GJBaseGameLayer::processCommands(dt, isHalfTick, isLastTick);
+
+        if (pcPl && deathMode() != "Off") recordPath(pcPl);
 
         if (m.mode == Mode::Recording && m_player1) {
             auto pos = m_player1->getPosition();
@@ -2545,6 +2597,7 @@ class $modify(MacroPlayLayer, PlayLayer) {
         g_levelCorrupt = false;
         g_path[0].clear(); g_path[1].clear();
         g_attemptInit = false;
+        g_lastDiedOn = std::numeric_limits<double>::quiet_NaN();
         g_deathShown = false;
         resetSplit();
         g_acc = RecAcc{};

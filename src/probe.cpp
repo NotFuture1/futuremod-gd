@@ -38,11 +38,11 @@ std::chrono::steady_clock::time_point g_lastWall;
 bool   g_haveWall = false;
 
 bool fidelityEnabled() {
-    return Mod::get()->getSettingValue<bool>("ghost-fidelity");
+    return fw::dev<bool>("ghost-fidelity", false);
 }
 
 bool tsProbeEnabled() {
-    return Mod::get()->getSettingValue<bool>("timestamp-probe");
+    return fw::dev<bool>("timestamp-probe", false);
 }
 
 void resetTicks() {

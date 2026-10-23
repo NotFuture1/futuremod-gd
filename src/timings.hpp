@@ -4,6 +4,8 @@
 #include <filesystem>
 #include <string>
 #include <vector>
+#include <cmath>
+#include <limits>
 
 // ===========================================================================
 // Per-click frame windows as plain data, independent of where they came from
@@ -21,6 +23,13 @@ struct Timing {
     double w = 0.0;  // its window, frames
     bool p2 = false; // player 2's click
     int input = 0;   // 1-based input number (for display)
+    // Survivable range relative to t, frames (lo <= 0 <= hi). Only known for
+    // our own analyses; NaN = unknown -> assume centred (-w/2 .. +w/2).
+    double lo = std::numeric_limits<double>::quiet_NaN();
+    double hi = std::numeric_limits<double>::quiet_NaN();
+    int down = -1;   // 1 = press, 0 = release, -1 = unknown
+    double loEdge() const { return std::isnan(lo) ? -w / 2.0 : lo; }
+    double hiEdge() const { return std::isnan(hi) ? w / 2.0 : hi; }
 };
 
 namespace timings {

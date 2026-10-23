@@ -374,8 +374,7 @@ void showDeath(PlayLayer* pl, std::vector<DeathRing> const& rings,
     for (auto const& d : rings) {
         auto ring = FwRing::create(d.levelPos, d.window);
         if (!ring) continue;
-        if (d.highlight) ring->boost = 1.35f;
-        layer->addChild(ring, d.highlight ? 1 : 0);
+        layer->addChild(ring, d.highlight ? 1 : 0); // died-on drawn on top; size = Ring size
         place(pl, layer, ring, size);
     }
 

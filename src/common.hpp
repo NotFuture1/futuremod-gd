@@ -15,19 +15,27 @@ using namespace geode::prelude;
 
 namespace fw {
 
+// Developer-only knobs: not in the settings screen (players never need them),
+// fixed defaults, but overridable in the mod's saved data as "dev-<key>" for
+// debugging (e.g. "dev-log-verbose": true in saved.json).
+template <class T>
+T dev(char const* key, T def) {
+    return Mod::get()->getSavedValue<T>(std::string("dev-") + key, def);
+}
+
 inline bool verbose() {
-    return Mod::get()->getSettingValue<bool>("log-verbose");
+    return dev<bool>("log-verbose", false);
 }
 
 // ghost-order selects which reconstruction of GD's physics step the ghost
 // simulation uses. Vanilla's real ordering inside processCommands is not
 // readable from the bindings, so it is an on-hardware A/B, not a guess.
 inline int ghostOrder() {
-    return static_cast<int>(Mod::get()->getSettingValue<int64_t>("ghost-order"));
+    return static_cast<int>(dev<int64_t>("ghost-order", 0));
 }
 
 inline double ghostEps() {
-    return Mod::get()->getSettingValue<double>("ghost-eps");
+    return dev<double>("ghost-eps", 0.1);
 }
 
 // True while the macro system is recording, replaying or analysing. Defined in

@@ -5,16 +5,20 @@
         "mac": "2.2081",
         "android": "2.2081"
     },
-    "version": "v1.14.0",
+    "version": "v1.15.0",
     "id": "future.futuremod",
     "name": "Future Mod",
     "developer": "future",
-    "description": "Skip level endings with a key, plus a per-level macro recorder with an automatic frame window counter (Click Between Frames supported).",
+    "description": "Frame window counter for GD: a CBF-aware macro bot that measures every click's frame window, NaN-style replay rings, frame windows on death, NaNDL comparison, plus optional cheat modules (click indicator, click practice, LDM instaswap). Also: skip level endings with a key.",
     "tags": [
         "gameplay",
         "utility"
     ],
     "settings": {
+        "general-title": {
+            "name": "General",
+            "type": "title"
+        },
         "skip-end": {
             "name": "Exit Level Ending",
             "description": "Press this while a level is finishing to instantly exit the level, skipping the end animation, the delay, and the completion screen. The level still counts as completed. Only active during the ending, so it's safe to set to your jump key (e.g. Space).",
@@ -22,56 +26,42 @@
             "category": "gameplay",
             "default": "Space"
         },
-        "macro-title": {
-            "name": "Macro + frame window counter",
-            "type": "title"
-        },
         "macro-enabled": {
-            "name": "Enable Macro Features",
-            "description": "Master switch for everything macro-related (recording, playback, the frame-perfect analyzer, the in-level menu, and the HUD). Turn this OFF to fully disable all macro functionality; the 'Exit Level Ending' keybind is unaffected.",
+            "name": "Enable macro features",
+            "description": "Master switch for the macro bot, frame window analysis, playback display, death display and the cheat modules. Off = all of it is disabled; 'Exit Level Ending' keeps working.",
             "type": "bool",
             "default": true
         },
+        "bot-title": {
+            "name": "Macro bot & frame windows",
+            "type": "title"
+        },
         "macro-record": {
-            "name": "Macro: Record",
-            "description": "Toggle recording your inputs. Works with Click Between Frames: each click's exact position inside the physics step is captured, so the replay and the analysis reproduce what CBF actually did. Recording restarts on death, so it captures the attempt you complete. Don't use CBF's Physics Bypass.",
+            "name": "Record",
+            "description": "Start / stop recording your inputs (normal mode). Works with Click Between Frames and from start positions (each start position gets its own macro). Recording restarts when you die, so it keeps the attempt you complete.",
             "type": "keybind",
             "category": "gameplay",
             "default": "J"
         },
         "macro-play": {
-            "name": "Macro: Play",
-            "description": "Toggle replaying the recorded macro from the start of the attempt.",
+            "name": "Replay",
+            "description": "Replay the recorded macro, with frame window rings if it has been analyzed.",
             "type": "keybind",
             "category": "gameplay",
             "default": "K"
         },
         "macro-analyze": {
-            "name": "Macro: Analyze frame windows",
-            "description": "Measure every input's frame window: shift it earlier/later, re-run, and find the range that still survives. Results go to geode.log, the HUD, and export files (CSV + NaNDL JSON) in the macros folder (pause menu > Files). Don't touch the keyboard/mouse while it runs. Turn off noclip, speedhack and CBF Physics Bypass.",
+            "name": "Analyze frame windows",
+            "description": "Measure every input's frame window. Hands off while it runs; no noclip/speedhack, and turn off CBF's Physics Bypass. Results: rings on replay, the death display, the NaNDL comparison, and export files (pause menu > Files).",
             "type": "keybind",
             "category": "gameplay",
             "default": "N"
-        },
-        "analyze-speed": {
-            "name": "Analyzer speed-up",
-            "description": "How fast to run the analysis. The analyzer tries this speed, and if a sped-up baseline doesn't reproduce your real 1x run tick-for-tick it automatically halves it (32->16->8->4->2->1) until it finds the fastest speed that stays exact. So a higher number is safe: it only ever speeds things up when it's provably identical to 1x.",
-            "type": "int",
-            "default": 16,
-            "min": 1,
-            "max": 32
         },
         "analyze-releases": {
             "name": "Analyze releases too",
             "description": "Also measure the timing window of RELEASES (letting go), not just presses. Wave/ship straight-flying is mostly release timing. Short taps are measured as one gesture either way. Turn off for cube-only levels to halve analysis time.",
             "type": "bool",
             "default": true
-        },
-        "analyze-fast": {
-            "name": "Fast analysis (EXPERIMENTAL)",
-            "description": "EXPERIMENTAL, off by default: it has crashed the game on some levels while being fixed. Snapshots the game before each input and starts that input's test runs from there instead of replaying the whole level, so long levels are far faster. Every snapshot is first checked by re-running it unshifted; one that doesn't reproduce your run is discarded and that input uses a full replay. Off = every test run replays from the level start: slower, but never touches GD's checkpoints.",
-            "type": "bool",
-            "default": false
         },
         "fw-max-window": {
             "name": "Max window (frames)",
@@ -89,90 +79,17 @@
             "min": 0,
             "max": 7
         },
-        "fw-wide-shortcut": {
-            "name": "Wide shortcut",
-            "description": "When an input survives being shifted 1 frame both ways, test far out on both sides (and halfway back) first: if all survive, it's wider than the max window and isn't a timing, found in about 6 runs instead of 11. It could only be wrong if a 1-frame death pocket hides between the checked frames. Turn off to walk every single frame (exact, slower).",
-            "type": "bool",
-            "default": true
-        },
-        "fw-classic-horizon": {
-            "name": "Classic survival rule (A/B)",
-            "description": "OFF (default): a shifted input is judged until the next input that could have corrected it (any press, or a release in ship/wave/robot). ON: the v1.5 rule (until the next input of any kind, at least 24 frames), which came out too tight vs NaN on spam. Only for comparing the two with the NaNDL button.",
-            "type": "bool",
-            "default": false
-        },
-        "nandl-compare": {
-            "name": "Compare with NaNDL after analysis",
-            "description": "When an analysis finishes on a level that's listed on nandl.pages.dev, show NaN's frame window counts next to yours. Turn off to skip the popup; the pause menu NaNDL button still works.",
-            "type": "bool",
-            "default": true
-        },
-        "nandl-name": {
-            "name": "NaNDL level name",
-            "description": "The level's name on nandl.pages.dev, if it differs from its name in GD. Leave blank to use the GD name. Used by the NaNDL comparison after an analysis and by the pause menu NaNDL button.",
-            "type": "string",
-            "default": ""
-        },
-        "analyze-display-title": {
-            "name": "Analyzer HUD rates",
+        "rings-title": {
+            "name": "Rings (replay + death)",
             "type": "title"
         },
-        "show-240": {
-            "name": "Show 240 FPS",
-            "description": "While analyzing, show the frame-perfect count at 240 (window <= 1 tick) in the top-right corner.",
-            "type": "bool",
-            "default": true
-        },
-        "show-120": {
-            "name": "Show 120 FPS",
-            "description": "While analyzing, show the frame-perfect count at 120 (window <= 2 ticks) in the top-right corner.",
-            "type": "bool",
-            "default": false
-        },
-        "show-60": {
-            "name": "Show 60 FPS",
-            "description": "While analyzing, show the frame-perfect count at 60 (window <= 4 ticks) in the top-right corner.",
-            "type": "bool",
-            "default": false
-        },
-        "death-title": {
-            "name": "Frame windows on death",
-            "type": "title"
-        },
-        "death-windows": {
-            "name": "Show on death",
-            "description": "When you die while playing normally: 'Died-on click' shows the frame window of the click you died on (a ring where you made it + a banner). 'All' shows a ring for every timing you passed this attempt, plus the level's window breakdown. Uses your own analysis of the level, or windows you imported (pause menu > Import). Levels with neither fall back to NaN's totals from NaNDL.",
-            "type": "string",
-            "default": "Died-on click",
-            "one-of": [
-                "Off",
-                "Died-on click",
-                "All"
-            ]
-        },
-        "death-windows-seconds": {
-            "name": "Banner time (s)",
-            "description": "How long the death banner stays on screen (it survives the respawn). The rings stay until your next attempt starts.",
+        "fw-ring-size": {
+            "name": "Ring size",
+            "description": "How big the frame window rings and their numbers are, on replay and on death. 1 = normal, 0.5 = half, 2 = double. Applies live.",
             "type": "float",
-            "default": 3.0,
-            "min": 0.5,
-            "max": 15.0
-        },
-        "death-nandl": {
-            "name": "Use NaNDL when a level has no windows",
-            "description": "If a level has no analysis and nothing imported, look it up on nandl.pages.dev and show NaN's window totals on death. NaNDL only publishes totals per level, so this can't point at a specific click.",
-            "type": "bool",
-            "default": true
-        },
-        "fw-display-title": {
-            "name": "Frame window display (playback)",
-            "type": "title"
-        },
-        "fw-rings": {
-            "name": "Frame window rings",
-            "description": "During macro playback (K), draw a ring on the player at every analyzed click and release, the moment it happens, labelled with its frame window and coloured by it (red = tight, green = loose; pink = sub-frame with CBF). A counter in the top-left shows how many inputs of each window you've passed so far. Same display as NaN GD's frame window videos. Run the analyzer (N) once first so the windows are known.",
-            "type": "bool",
-            "default": true
+            "default": 1.0,
+            "min": 0.25,
+            "max": 3.0
         },
         "fw-ring-pop": {
             "name": "Ring pop-in animation",
@@ -180,13 +97,15 @@
             "type": "bool",
             "default": true
         },
-        "fw-ring-size": {
-            "name": "Ring size",
-            "description": "How big the rings (and their window numbers) are. 1 = normal, 0.5 = half, 2 = double. Changes apply live, even to rings already on screen.",
-            "type": "float",
-            "default": 1.0,
-            "min": 0.25,
-            "max": 3.0
+        "display-title": {
+            "name": "Replay display",
+            "type": "title"
+        },
+        "fw-rings": {
+            "name": "Frame window rings",
+            "description": "During macro playback (K), draw a ring on the player at every analyzed click and release, the moment it happens, labelled with its frame window and coloured by it (red = tight, green = loose; pink = sub-frame with CBF). A counter in the top-left shows how many inputs of each window you've passed so far. Same display as NaN GD's frame window videos. Run the analyzer (N) once first so the windows are known.",
+            "type": "bool",
+            "default": true
         },
         "fw-sound": {
             "name": "Frame window sound",
@@ -208,43 +127,87 @@
             "min": 0.0,
             "max": 1.0
         },
-        "fw-title": {
-            "name": "Diagnostics (optional)",
+        "death-title": {
+            "name": "Frame windows on death",
             "type": "title"
         },
-        "ghost-fidelity": {
-            "name": "Ghost fidelity probe",
-            "description": "OPTIONAL DIAGNOSTIC, not needed for the frame window counter. DIAGNOSTIC. Every 120 ticks of normal play, simulate a copy of the player 60 ticks ahead and compare it against what you actually do. Writes [fw] GHOSTFID lines to geode.log and a PHASE1 ... VERDICT=PASS/FAIL line when you die or quit. This decides whether the new frame-window counter can measure sub-frame windows at all. Costs nothing visually; turn it off when you're done testing.",
+        "death-windows": {
+            "name": "Show on death",
+            "description": "When you die while playing normally: 'Died-on click' puts a frame window ring where you made the click you died on (the latest click whose window had opened when you died). 'All' rings every click you passed this attempt. Uses your analysis of the level or imported windows. Rings stay until your next attempt.",
+            "type": "string",
+            "default": "Died-on click",
+            "one-of": [
+                "Off",
+                "Died-on click",
+                "All"
+            ]
+        },
+        "death-nandl": {
+            "name": "Use NaNDL when a level has no windows",
+            "description": "If a level has no analysis and nothing imported, show NaN's window totals from nandl.pages.dev for a few seconds when you die (the only text shown on death: NaNDL has no per-click windows to put a ring on).",
+            "type": "bool",
+            "default": true
+        },
+        "nandl-title": {
+            "name": "NaNDL (NaN's list)",
+            "type": "title"
+        },
+        "nandl-compare": {
+            "name": "Compare with NaNDL after analysis",
+            "description": "When an analysis finishes on a level that's listed on nandl.pages.dev, show NaN's frame window counts next to yours. Turn off to skip the popup; the pause menu NaNDL button still works.",
+            "type": "bool",
+            "default": true
+        },
+        "nandl-name": {
+            "name": "NaNDL level name",
+            "description": "The level's name on nandl.pages.dev, if it differs from its name in GD. Leave blank to use the GD name. Used by the NaNDL comparison after an analysis and by the pause menu NaNDL button.",
+            "type": "string",
+            "default": ""
+        },
+        "cheat-title": {
+            "name": "Cheat modules (runs don't count)",
+            "type": "title"
+        },
+        "mod-click-indicator": {
+            "name": "Click indicator",
+            "description": "CHEAT. An approach ring above your icon shrinks as the next timing comes up, and turns green with CLICK / RELEASE while you're inside its frame window. Uses the level's analyzed windows (your analysis or an import). While any cheat module is on, the run is marked CHEATING and doesn't save progress.",
             "type": "bool",
             "default": false
         },
-        "ghost-order": {
-            "name": "Ghost step order",
-            "description": "Which reconstruction of GD's physics step the simulation uses. GD's real internal ordering can't be read from the game, so this is tested by trial: run the fidelity probe once on each of 0, 1 and 2 and keep whichever gives the smallest maxdx. 0 = collide, move, rotate (what every other trajectory mod uses). 1 = move, collide, rotate. 2 = collide, move, special, rotate.",
+        "indicator-lead": {
+            "name": "Indicator lead (frames)",
+            "description": "How early the approach ring appears before a timing (240 Hz frames; 60 = a quarter second).",
             "type": "int",
-            "default": 0,
-            "min": 0,
-            "max": 2
+            "default": 60,
+            "min": 10,
+            "max": 240
         },
-        "ghost-eps": {
-            "name": "Ghost tolerance (units)",
-            "description": "How far the simulated player may drift from the real one before it counts as diverged. Used by the fidelity probe's divergeAt column.",
-            "type": "float",
-            "default": 0.1,
-            "min": 0.001,
-            "max": 5.0
-        },
-        "timestamp-probe": {
-            "name": "Timestamp clock probe",
-            "description": "OPTIONAL DIAGNOSTIC, not needed for the frame window counter. DIAGNOSTIC. Logs 100 [fw] TSPROBE lines at the start of a level showing the game's internal input timestamp. Answers one question: whether GD's own between-steps input path can be driven at an exact sub-tick time, which would let windows be measured below one frame in the real engine. One run is enough, ever.",
+        "mod-click-practice": {
+            "name": "Click practice",
+            "description": "CHEAT. Practice only the clicks you pick (pause menu > Practice): around those, you play them yourself at their real difficulty; every other click is played by the bot from your macro, and your inputs there are ignored. Needs a recorded (and ideally analyzed) macro for the level. Marks the run as CHEATING.",
             "type": "bool",
             "default": false
         },
-        "log-verbose": {
-            "name": "Verbose logging",
-            "description": "Write per-tick detail to geode.log. Very noisy; only enable when asked for a detailed log.",
+        "practice-margin": {
+            "name": "Practice margin (frames)",
+            "description": "How long before and after a picked click you're in control (frames). Must be wider than the click's window; 12 is plenty for most.",
+            "type": "int",
+            "default": 12,
+            "min": 4,
+            "max": 120
+        },
+        "mod-ldm-swap": {
+            "name": "LDM instaswap",
+            "description": "CHEAT. Bind a level to its LDM / ULDM version (pause menu > LDM), then press the key to swap between them instantly. Your start positions are copied into the LDM version and you stay on the same start position. Marks the run as CHEATING.",
             "type": "bool",
             "default": false
+        },
+        "ldm-swap-key": {
+            "name": "LDM swap key",
+            "description": "Swaps between the level and the LDM version bound to it.",
+            "type": "keybind",
+            "category": "gameplay",
+            "default": "F6"
         }
     }
 }
