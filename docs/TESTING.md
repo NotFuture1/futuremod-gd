@@ -1,4 +1,4 @@
-# Testing the frame window counter (v1.12.1)
+# Testing the frame window counter (v1.13.0)
 
 Do the tests in order. Each one tells you what to look for, what counts as a
 pass, and what to send back. Everything the mod reports goes to `geode.log`
@@ -164,6 +164,24 @@ If there's no sound, try **Sound file** = `playSound_01.ogg` in settings.
    the name on nandl.pages.dev.
 4. A/B: turn **Classic survival rule (A/B)** on, analyze again, compare. Tell
    me both averages (or send geode.log: the `[fw] NANDL` lines have it all).
+
+---
+
+## Step 4d: Frame windows on death (v1.13.0)
+
+1. Settings > **Show on death**: `Died-on click` (default) or `All`.
+2. On a level you analyzed, play normally (no macro) and die on purpose.
+   - `Died-on click`: a bigger ring where you made the click you died on, and
+     a banner: "Died on a 2.37f timing" / "click #42 - 12 of 137 timings passed".
+   - `All`: rings on every timing you passed this attempt + the window breakdown.
+3. Import: pause menu > **Import**, pick a `.nandl.json`, `.fwc.json` or `.fwc`
+   (e.g. one exported from another level, or from the frame-window-counter
+   mod). The popup says how many windows were imported; dying then uses them
+   on levels without your own analysis.
+4. A level with neither: dying shows NaN's totals from NaNDL if the level is
+   listed there (set **NaNDL level name** if its name differs), otherwise a
+   hint to analyze or import.
+5. Log lines: `[fw] DEATH ...` and `[fw] IMPORT ...`.
 
 ---
 

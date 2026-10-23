@@ -2,6 +2,7 @@
 
 #include <Geode/Geode.hpp>
 #include <vector>
+#include <string>
 
 using namespace geode::prelude;
 
@@ -27,5 +28,19 @@ void stop(PlayLayer* pl);
 void onInput(PlayLayer* pl, std::vector<PlayerObject*> const& players, double window);
 // Once per frame after the camera has moved: keep the rings pinned to the level.
 void tick(PlayLayer* pl);
+
+// ---- on death (normal play) ----------------------------------------------
+struct DeathRing {
+    cocos2d::CCPoint levelPos; // object-layer space (where the click happened)
+    double window;
+    bool highlight;            // the click you died on
+};
+// Rings at the given spots + a banner (first line big, the rest small) that
+// fades out after `seconds`. Rings stay until clearDeathRings (next attempt).
+void showDeath(PlayLayer* pl, std::vector<DeathRing> const& rings,
+               std::vector<std::string> const& lines, float seconds);
+void clearDeathRings(PlayLayer* pl);
+// a window as the rings label it ("3", "2.37")
+std::string windowText(double w);
 
 } // namespace fw::display

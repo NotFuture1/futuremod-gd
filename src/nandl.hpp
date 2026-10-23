@@ -3,6 +3,8 @@
 #include <array>
 #include <string>
 #include <vector>
+#include <functional>
+#include <optional>
 
 // ===========================================================================
 // NaNDL-compatible counting + comparison against NaN's published data.
@@ -29,5 +31,23 @@ std::string fmtHist(Hist const& h);
 // Fetch NaNDL's published histogram for `levelName` and show it next to ours
 // (popup + [fw] NANDL log line). `quiet`: say nothing if the level isn't listed.
 void compare(std::string levelName, Hist ours, bool quiet);
+
+// What NaNDL publishes about one level. Only per-level numbers -- NaNDL has
+// no per-click windows, so this can't say which click is which.
+struct LevelInfo {
+    std::string name;
+    Hist hist{};          // inputs with 0..10 frames available
+    double precision = 0; // sigma/s
+    int inputs = 0;
+    double length = 0;    // seconds
+};
+
+// Look a level up on NaNDL (the "NaNDL level name" setting overrides the GD
+// name). The list is fetched once per session; `done` gets nullopt if the
+// level isn't listed or the site can't be reached.
+void lookup(std::string levelName, std::function<void(std::optional<LevelInfo>)> done);
+
+// Already fetched and known? (no network) -- for code that can't wait.
+std::optional<LevelInfo> cached(std::string levelName);
 
 } // namespace fw::nandl

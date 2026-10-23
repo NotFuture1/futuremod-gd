@@ -5,7 +5,7 @@
         "mac": "2.2081",
         "android": "2.2081"
     },
-    "version": "v1.12.1",
+    "version": "v1.13.0",
     "id": "future.futuremod",
     "name": "Future Mod",
     "developer": "future",
@@ -134,6 +134,35 @@
             "description": "While analyzing, show the frame-perfect count at 60 (window <= 4 ticks) in the top-right corner.",
             "type": "bool",
             "default": false
+        },
+        "death-title": {
+            "name": "Frame windows on death",
+            "type": "title"
+        },
+        "death-windows": {
+            "name": "Show on death",
+            "description": "When you die while playing normally: 'Died-on click' shows the frame window of the click you died on (a ring where you made it + a banner). 'All' shows a ring for every timing you passed this attempt, plus the level's window breakdown. Uses your own analysis of the level, or windows you imported (pause menu > Import). Levels with neither fall back to NaN's totals from NaNDL.",
+            "type": "string",
+            "default": "Died-on click",
+            "one-of": [
+                "Off",
+                "Died-on click",
+                "All"
+            ]
+        },
+        "death-windows-seconds": {
+            "name": "Banner time (s)",
+            "description": "How long the death banner stays on screen (it survives the respawn). The rings stay until your next attempt starts.",
+            "type": "float",
+            "default": 3.0,
+            "min": 0.5,
+            "max": 15.0
+        },
+        "death-nandl": {
+            "name": "Use NaNDL when a level has no windows",
+            "description": "If a level has no analysis and nothing imported, look it up on nandl.pages.dev and show NaN's window totals on death. NaNDL only publishes totals per level, so this can't point at a specific click.",
+            "type": "bool",
+            "default": true
         },
         "fw-display-title": {
             "name": "Frame window display (playback)",

@@ -2,6 +2,7 @@
 #include "sim/ghost.hpp"
 #include "display.hpp"
 #include "nandl.hpp"
+#include "timings.hpp"
 
 #include <Geode/Geode.hpp>
 #include <Geode/modify/GJBaseGameLayer.hpp>
@@ -20,6 +21,10 @@
 #include <cmath>
 #include <limits>
 #include <chrono>
+#include <map>
+#include <optional>
+#include <Geode/utils/async.hpp>
+#include <Geode/utils/file.hpp>
 #include <cstring>
 
 using namespace geode::prelude;
@@ -224,6 +229,10 @@ struct Macro {
     // replays by a few units (enough to die).
     std::unordered_map<int, std::vector<float>> subDts;
 
+    // Per-click windows imported from a file (pause menu > Import) for levels
+    // without our own analysis. Saved as macros/<key>.imported.json.
+    std::vector<fw::Timing> imported;
+
     // --- analyzer ---
     std::vector<size_t> targets;
     std::vector<WinResult> results;
@@ -360,6 +369,22 @@ struct Macro {
 
     // which inputs get a ring on playback (wide = not a timing = no ring);
     // returns the measured windows for the counter's totals
+    // This level's per-click windows: our own analysis if there is one, else an
+    // imported file. Empty = neither (death display falls back to NaNDL).
+    std::vector<fw::Timing> timings(bool* fromAnalysis = nullptr) const {
+        std::vector<fw::Timing> out;
+        for (auto const& sw : savedWindows) {
+            if (sw.idx < 0 || sw.idx >= static_cast<int>(inputs.size())) continue;
+            if (sw.status == static_cast<char>(WStatus::Wide) || sw.window <= 0.0) continue;
+            auto const& in = inputs[sw.idx];
+            out.push_back({ in.t(), sw.window, !in.player1, sw.idx + 1 });
+        }
+        if (fromAnalysis) *fromAnalysis = !out.empty();
+        if (out.empty()) out = imported;
+        std::stable_sort(out.begin(), out.end(), [](fw::Timing const& a, fw::Timing const& b) { return a.t < b.t; });
+        return out;
+    }
+
     // every measured (non-wide) window, for the NaNDL histogram
     std::vector<double> measuredWindows() const {
         std::vector<double> w;
@@ -413,6 +438,11 @@ struct Macro {
     // Load the macro saved for a given level key (clears in-memory macro if none).
     void loadForLevel(std::string const& key) {
         curKey = key;
+        imported.clear();
+        if (auto imp = fw::timings::readFile(macrosDir() / (key + ".imported.json")); imp && !imp.unwrap().empty()) {
+            imported = imp.unwrap();
+            log::info("[macro] level '{}': {} imported frame windows", key, imported.size());
+        }
         inputs.clear();
         savedWindows.clear();
         track.clear();
@@ -1377,6 +1407,20 @@ void writeExports() {
         if (!res) log::warn("[fw] export failed ({}): {}", p.string(), res.unwrapErr());
     };
     w(dir / (m.curKey + ".windows.csv"), csv);
+    {   // frame-window-counter's own binary format
+        std::vector<fw::Timing> tl;
+        for (auto const& sw : wins) {
+            if (sw.idx < 0 || sw.idx >= static_cast<int>(m.inputs.size())) continue;
+            if (static_cast<WStatus>(sw.status) == WStatus::Wide || sw.window <= 0.0) continue;
+            auto const& in = m.inputs[sw.idx];
+            tl.push_back({ in.t(), sw.window, !in.player1, sw.idx + 1 });
+        }
+        if (!tl.empty()) {
+            auto bytes = fw::timings::toFwc(tl);
+            auto res = file::writeBinary(dir / (m.curKey + ".fwc"), bytes);
+            if (!res) log::warn("[fw] export failed (.fwc): {}", res.unwrapErr());
+        }
+    }
     if (!rowsAll.empty()) w(dir / (m.curKey + ".nandl.json"), json(rowsAll));
     if (!rowsFwc.empty()) w(dir / (m.curKey + ".fwc.json"), json(rowsFwc));
     FW_LOG("EXPORT dir='{}' key={} nandlRows={} fwcRows={}",
@@ -1673,6 +1717,125 @@ void startAnalysis() {
 
 } // namespace
 
+// ---------------------------------------------------------------------------
+// Frame windows on death (normal play). Where each player was at every level
+// step of this attempt is kept, so a click's ring goes where YOU made it.
+// ---------------------------------------------------------------------------
+namespace {
+
+std::vector<CCPoint> g_path[2]; // object-layer positions by level step (kNoPos = unknown)
+bool g_deathShown = false;
+
+std::string deathMode() {
+    return Mod::get()->getSettingValue<std::string>("death-windows");
+}
+
+void recordPath(PlayLayer* pl) {
+    if (!pl->m_objectLayer) return;
+    int st = static_cast<int>(std::llround(pl->m_gameState.m_levelTime * 240.0));
+    if (st < 0 || st > 2'000'000) return;
+    PlayerObject* ps[2] = { pl->m_player1, pl->m_player2 };
+    for (int k = 0; k < 2; k++) {
+        auto p = ps[k];
+        if (!p || !p->getParent()) continue;
+        auto& path = g_path[k];
+        if (static_cast<int>(path.size()) <= st) path.resize(st + 1, CCPoint{ kNoPos, kNoPos });
+        path[st] = pl->m_objectLayer->convertToNodeSpace(p->getParent()->convertToWorldSpace(p->getPosition()));
+    }
+}
+
+std::optional<CCPoint> pathAt(bool p2, double t) {
+    auto const& path = g_path[p2 ? 1 : 0];
+    int st = static_cast<int>(std::floor(t + 1e-9));
+    for (int k = std::min(st, static_cast<int>(path.size()) - 1); k >= 0 && k >= st - 8; k--)
+        if (path[k].x != kNoPos) return path[k];
+    return std::nullopt;
+}
+
+std::string histLine(std::vector<fw::Timing> const& list) {
+    std::map<int, int> bins;
+    for (auto const& t : list) bins[std::max(0, static_cast<int>(std::floor(t.w + 1e-9)))]++;
+    std::string s;
+    for (auto const& [b, n] : bins) {
+        if (!s.empty()) s += "   ";
+        s += fmt::format("{}-{}f: {}", b, b + 1, n);
+    }
+    return s;
+}
+
+void showNandlFallback(PlayLayer* pl, float secs) {
+    std::string name = pl->m_level ? std::string(pl->m_level->m_levelName) : std::string();
+    auto show = [secs](std::optional<fw::nandl::LevelInfo> info) {
+        auto pl2 = PlayLayer::get();
+        if (!pl2) return;
+        std::vector<std::string> lines;
+        if (info) {
+            lines.push_back(fmt::format("NaN's windows for {}", info->name));
+            lines.push_back(fmt::format("{} inputs, {:.0f}s, precision {:.1f}", info->inputs, info->length, info->precision));
+            std::string h;
+            for (size_t k = 0; k < info->hist.size(); k++) {
+                if (info->hist[k] < 0.05) continue;
+                if (!h.empty()) h += "   ";
+                h += fmt::format("{}f: {:.1f}", k, info->hist[k]);
+            }
+            if (!h.empty()) lines.push_back(h);
+            lines.push_back("(NaNDL only lists totals, not which click is which)");
+        } else {
+            lines.push_back("No frame windows for this level");
+            lines.push_back("Analyze it (your Analyze key) or Import a file (pause menu)");
+        }
+        fw::display::showDeath(pl2, {}, lines, secs);
+    };
+    if (!Mod::get()->getSettingValue<bool>("death-nandl")) { show(std::nullopt); return; }
+    if (auto c = fw::nandl::cached(name)) { show(c); return; }
+    fw::nandl::lookup(name, show);
+}
+
+void onDeath(PlayLayer* pl, PlayerObject* who) {
+    auto mode = deathMode();
+    bool all = mode == "All";
+    float secs = static_cast<float>(Mod::get()->getSettingValue<double>("death-windows-seconds"));
+    auto& m = Macro::get();
+    auto list = m.timings();
+    if (list.empty()) { showNandlFallback(pl, secs); return; }
+
+    bool p2 = who && who == pl->m_player2;
+    double D = pl->m_gameState.m_levelTime * 240.0;
+    constexpr double kTol = 2.0; // a click a hair after the death tick still counts
+    // the click you died on: the last timing (of the player that died, if it
+    // has any) at or just before the death
+    bool anyForPlayer = std::any_of(list.begin(), list.end(), [&](fw::Timing const& t) { return t.p2 == p2; });
+    int died = -1, passed = 0;
+    for (int i = 0; i < static_cast<int>(list.size()); i++) {
+        if (list[i].t > D + kTol) break;
+        passed++;
+        if (!anyForPlayer || list[i].p2 == p2) died = i;
+    }
+
+    std::vector<fw::display::DeathRing> rings;
+    for (int i = 0; i < passed; i++) {
+        if (!all && i != died) continue;
+        auto pos = pathAt(list[i].p2, list[i].t);
+        if (!pos && i == died && who && who->getParent() && pl->m_objectLayer)
+            pos = pl->m_objectLayer->convertToNodeSpace(who->getParent()->convertToWorldSpace(who->getPosition()));
+        if (pos) rings.push_back({ *pos, list[i].w, i == died });
+    }
+
+    std::vector<std::string> lines;
+    if (died >= 0)
+        lines.push_back(fmt::format("Died on a {}f timing", fw::display::windowText(list[died].w)));
+    else
+        lines.push_back("Died before the first timing");
+    lines.push_back(fmt::format("{}{} of {} timings passed",
+        died >= 0 ? fmt::format("click #{}  -  ", list[died].input) : std::string(), passed, list.size()));
+    if (all) lines.push_back(histLine(list));
+    fw::display::showDeath(pl, rings, lines, secs);
+    FW_LOG("DEATH levelStep={:.0f} diedOn={} window={} passed={}/{}", D, died >= 0 ? list[died].input : -1,
+        died >= 0 ? list[died].w : -1.0, passed, list.size());
+}
+
+} // namespace
+
 // Exposed for the frame-window diagnostics (src/probe.cpp): they must not run
 // while the macro system is driving the player.
 namespace fw {
@@ -1754,6 +1917,11 @@ class $modify(MacroBGL, GJBaseGameLayer) {
             m.step = static_cast<int>(std::llround(m.gameTime * 240.0));
         }
         GJBaseGameLayer::processCommands(dt, isHalfTick, isLastTick);
+
+        if ((m.mode == Mode::Idle || m.mode == Mode::Recording) && !fw::ghost::isSim()
+            && deathMode() != "Off") {
+            if (auto pl = PlayLayer::get(); pl && static_cast<GJBaseGameLayer*>(pl) == this) recordPath(pl);
+        }
 
         if (m.mode == Mode::Recording && m_player1) {
             auto pos = m_player1->getPosition();
@@ -1974,7 +2142,7 @@ class $modify(MacroBGL, GJBaseGameLayer) {
         } else {
             GJBaseGameLayer::update(dt);
             // after the camera moved this frame: keep the rings pinned to the level
-            if (m.mode == Mode::Playing && static_cast<GJBaseGameLayer*>(PlayLayer::get()) == this)
+            if (static_cast<GJBaseGameLayer*>(PlayLayer::get()) == this)
                 fw::display::tick(PlayLayer::get());
         }
     }
@@ -2263,6 +2431,8 @@ class $modify(MacroPlayLayer, PlayLayer) {
         m.mode = Mode::Idle;
         m.anchors.clear(); // never keep checkpoint refs from another level
         g_levelCorrupt = false;
+        g_path[0].clear(); g_path[1].clear();
+        g_deathShown = false;
         resetSplit();
         g_acc = RecAcc{};
         if (macroEnabled()) m.loadForLevel(levelKeyFor(level));
@@ -2283,6 +2453,10 @@ class $modify(MacroPlayLayer, PlayLayer) {
     void resetLevel() {
         if (g_levelCorrupt) return; // frozen after a GD error: resetting would throw again
         auto& m = Macro::get();
+        if (m.mode != Mode::Analyzing) {
+            fw::display::clearDeathRings(this);
+            g_deathShown = false;
+        }
         if (m.mode == Mode::Playing && m.step > 0) logPlaybackVerdict("died");
         PlayLayer::resetLevel();
         int cpCount = m_checkpointArray ? m_checkpointArray->count() : 0;
@@ -2372,6 +2546,12 @@ class $modify(MacroPlayLayer, PlayLayer) {
         auto& m = Macro::get();
         if (m.mode == Mode::Analyzing && !m.inBeginTest && p && p->m_isDead)
             resolveDeath(m, std::max(0, m.step - 1));
+        // frame windows on death (normal play / recording, not the macro's own runs)
+        if ((m.mode == Mode::Idle || m.mode == Mode::Recording) && p && p->m_isDead
+            && !g_deathShown && macroEnabled() && deathMode() != "Off") {
+            g_deathShown = true;
+            onDeath(this, p);
+        }
     }
 
     void playEndAnimationToPos(CCPoint pos) {
@@ -2458,9 +2638,12 @@ class $modify(MacroPauseLayer, PauseLayer) {
         auto spr3 = ButtonSprite::create("NaNDL");
         spr3->setScale(0.6f);
         menu->addChild(CCMenuItemSpriteExtra::create(spr3, this, menu_selector(MacroPauseLayer::onNandl)));
+        auto spr4 = ButtonSprite::create("Import");
+        spr4->setScale(0.6f);
+        menu->addChild(CCMenuItemSpriteExtra::create(spr4, this, menu_selector(MacroPauseLayer::onImport)));
         menu->alignItemsHorizontallyWithPadding(6.f);
         auto win = CCDirector::sharedDirector()->getWinSize();
-        menu->setPosition(120.f, win.height - 22.f); // top-left corner of the pause screen
+        menu->setPosition(150.f, win.height - 22.f); // top-left corner of the pause screen
         menu->setZOrder(100);
         this->addChild(menu);
     }
@@ -2471,6 +2654,39 @@ class $modify(MacroPauseLayer, PauseLayer) {
         auto& m = Macro::get();
         if (PlayLayer::get() && !m.savedWindows.empty() && m.mode == Mode::Idle) writeExports();
         file::openFolder(macrosDir());
+    }
+
+    // import someone's per-click windows for this level (NaNDL calculator JSON
+    // incl. our own .nandl.json/.fwc.json, or frame-window-counter's .fwc)
+    void onImport(CCObject*) {
+        auto pl = PlayLayer::get();
+        if (!pl || !pl->m_level) return;
+        std::string key = Macro::get().curKey;
+        file::FilePickOptions opts;
+        opts.defaultPath = macrosDir();
+        opts.filters.push_back({ "Frame windows (*.json, *.fwc)", { "*.json", "*.fwc" } });
+        async::spawn(file::pick(file::PickMode::OpenFile, opts), [key](file::PickResult res) {
+            if (!res || !res.unwrap()) return; // cancelled
+            auto path = *res.unwrap();
+            auto list = fw::timings::readFile(path);
+            if (!list) {
+                createQuickPopup("Import", fmt::format("Couldn't read that file:\n{}", list.unwrapErr()),
+                    "OK", nullptr, [](auto, bool) {});
+                return;
+            }
+            auto& m = Macro::get();
+            if (m.curKey != key) return; // left the level meanwhile
+            m.imported = list.unwrap();
+            auto save = file::writeString(macrosDir() / (key + ".imported.json"), fw::timings::toNandlJson(m.imported));
+            if (!save) log::warn("[fw] couldn't save imported windows: {}", save.unwrapErr());
+            FW_LOG("IMPORT '{}' -> {} timings for {}", path.filename().string(), m.imported.size(), key);
+            bool own = false;
+            m.timings(&own);
+            createQuickPopup("Import",
+                fmt::format("Imported <cg>{}</c> frame windows for this level.{}", m.imported.size(),
+                    own ? "\n\nThis level also has your own analysis, which is used first." : ""),
+                "OK", nullptr, [](auto, bool) {});
+        });
     }
 
     // compare this level's saved analysis with NaN's published frame windows

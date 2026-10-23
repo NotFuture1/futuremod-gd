@@ -57,9 +57,87 @@ void show(std::string const& name, fw::nandl::Hist const& nan, fw::nandl::Hist c
     MDPopup::create(true, "NaNDL comparison", md, "OK")->show();
 }
 
+// the whole NaNDL list, fetched once per session
+struct ListCache {
+    bool fetched = false, fetching = false;
+    std::vector<fw::nandl::LevelInfo> levels;
+    std::vector<std::function<void()>> waiting;
+};
+ListCache& listCache() { static ListCache c; return c; }
+
+double numOf(matjson::Value const& v) {
+    if (v.isNumber()) return v.asDouble().unwrapOr(0.0);
+    if (v.isString()) return std::strtod(v.asString().unwrapOr("0").c_str(), nullptr);
+    return 0.0;
+}
+
+void parseList(matjson::Value const& root) {
+    auto& c = listCache();
+    c.levels.clear();
+    auto fws = root["frameWindows"].asArray();
+    auto rks = root["rankings"].asArray();
+    if (!fws) return;
+    for (auto const& row : fws.unwrap()) {
+        fw::nandl::LevelInfo li;
+        li.name = row["name"].asString().unwrapOr("");
+        li.precision = numOf(row["precision"]);
+        if (auto h = row["frameWindows"].asArray()) {
+            size_t k = 0;
+            for (auto const& v : h.unwrap()) if (k < li.hist.size()) li.hist[k++] = numOf(v);
+        }
+        if (rks) for (auto const& r : rks.unwrap()) {
+            if (r["name"].asString().unwrapOr("") != li.name) continue;
+            li.inputs = static_cast<int>(numOf(r["inputs"]));
+            li.length = numOf(r["length"]);
+            break;
+        }
+        c.levels.push_back(li);
+    }
+}
+
+std::string wantedName(std::string levelName) {
+    auto override_ = Mod::get()->getSettingValue<std::string>("nandl-name");
+    if (!norm(override_).empty()) levelName = override_;
+    return norm(levelName);
+}
+
+std::optional<fw::nandl::LevelInfo> findCached(std::string const& want) {
+    for (auto const& li : listCache().levels)
+        if (norm(li.name) == want) return li;
+    return std::nullopt;
+}
+
 } // namespace
 
 namespace fw::nandl {
+
+std::optional<LevelInfo> cached(std::string levelName) {
+    auto want = wantedName(std::move(levelName));
+    if (want.empty() || !listCache().fetched) return std::nullopt;
+    return findCached(want);
+}
+
+void lookup(std::string levelName, std::function<void(std::optional<LevelInfo>)> done) {
+    auto want = wantedName(std::move(levelName));
+    auto& c = listCache();
+    if (want.empty()) { done(std::nullopt); return; }
+    if (c.fetched) { done(findCached(want)); return; }
+    c.waiting.push_back([want, done] { done(findCached(want)); });
+    if (c.fetching) return;
+    c.fetching = true;
+    async::spawn(web::WebRequest().get(kApi), [](web::WebResponse res) {
+        auto& c = listCache();
+        c.fetching = false;
+        if (res.ok()) {
+            if (auto json = res.json()) { parseList(json.unwrap()); c.fetched = true; }
+        } else {
+            FW_WARN("NANDL list fetch failed: HTTP {}", res.code());
+        }
+        auto waiting = std::move(c.waiting);
+        c.waiting.clear();
+        for (auto& w : waiting) w();
+    });
+}
 
 Hist histogram(std::vector<double> const& windows) {
     Hist h{};
