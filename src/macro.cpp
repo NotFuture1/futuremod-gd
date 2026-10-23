@@ -51,6 +51,7 @@ constexpr int kMargin     = 48;  // ticks past the last input the BASELINE / anc
 constexpr int kMinHorizon = 24; // classic rule only
 constexpr int kGrace      = 2;  // ticks after the correcting input to register a death
 constexpr double kPushGap = 1.0; // frames kept between a shifted click and a neighbour it pushes
+constexpr float kNoPos = 1e30f;  // track slot never written (a skipped step index), not a position
 constexpr int kMaxHorizon = 240;
 constexpr double kFrameBudgetMs = 28.0; // analysis work per rendered frame (~35 fps on screen)
 constexpr int kFF      = 1;   // 1 = no fast-forward (FF corrupts physics -> false deaths)
@@ -946,14 +947,8 @@ bool anchorUsable(Macro& m, int tstep, int firstChange) {
     // inputs AT the snapshot step are baked in: everything this probe changes
     // (incl. pushed neighbours) must come strictly after it
     if (it->second.step >= firstChange) { m.anchorTooLate++; return false; }
-    // Must still be in GD's checkpoint list. Restoring one GD has dropped
-    // (its marker object taken out of the level's section grid) drifted every
-    // time and crashed GD with CBF ("vector too long" in addToSection).
     auto pl = PlayLayer::get();
-    if (!pl || !pl->m_checkpointArray || !pl->m_checkpointArray->containsObject(it->second.cp)) {
-        m.anchorNotListed++;
-        return false;
-    }
+    if (!pl || !pl->m_checkpointArray) { m.anchorNotListed++; return false; }
     return true;
 }
 
@@ -1057,12 +1052,16 @@ void beginTest() {
             auto const& a = it->second;
             // resetLevel FIRST: it cancels any auto-respawn GD still has pending
             // from the previous probe's death; the checkpoint then overrides it.
+            // Restore = GD's own practice respawn: with exactly this checkpoint in
+            // its list, resetLevel() respawns the level AND the players at it.
+            // (loadFromCheckpoint() alone restores the level objects but leaves
+            // the player wherever the reset put it -- every restore "drifted" by
+            // thousands of units, and with CBF GD's section grid threw.)
             auto tr = std::chrono::steady_clock::now();
+            pl->m_checkpointArray->addObject(a.cp);
             pl->resetLevel();
-            auto tl = std::chrono::steady_clock::now();
-            m.perfReset += std::chrono::duration<double, std::milli>(tl - tr).count();
-            pl->loadFromCheckpoint(a.cp);
-            m.perfLoad += msSince(tl);
+            pl->m_checkpointArray->removeObject(a.cp);
+            m.perfReset += msSince(tr);
             restoreHeld(pl->m_player1, a.p1);
             restoreHeld(pl->m_player2, a.p2);
             m.step = a.step;
@@ -1207,17 +1206,32 @@ bool pickNextRefine(Macro& m) {
 
 void finishAnalysis();
 
+// Our save-states are kept OUT of GD's checkpoint list (see beginTest), so
+// GD's own cleanup never saw them: put them back and let removeAllCheckpoints
+// tear them down properly, then drop our refs.
+void dropAnchors() {
+    auto& m = Macro::get();
+    if (auto pl = PlayLayer::get(); pl && pl->m_checkpointArray) {
+        for (auto const& [i, a] : m.anchors)
+            if (a.cp && !pl->m_checkpointArray->containsObject(a.cp)) pl->m_checkpointArray->addObject(a.cp);
+        pl->removeAllCheckpoints();
+    }
+    m.anchors.clear();
+}
+
+// Set when GD threw mid-run: the level's object state can't be trusted, so it
+// is frozen (no updates, no resets) until you leave it -- resetting it is what
+// turned a caught error into a crash.
+bool g_levelCorrupt = false;
+
 // stop the analysis without results (error path)
 void abortAnalysis(std::string const& msg) {
     auto& m = Macro::get();
     m.mode = Mode::Idle;
     setAnalyzeSpeed(1.f);
     resetSplit();
-    m.anchors.clear();
-    if (auto pl = PlayLayer::get()) {
-        pl->removeAllCheckpoints();
-        pl->resetLevelFromStart();
-    }
+    m.anchors.clear(); // refs only: touching GD's checkpoint list now could throw again
+    g_levelCorrupt = true;
     notify(msg, NotificationIcon::Error);
 }
 
@@ -1375,8 +1389,7 @@ void finishAnalysis() {
     auto& m = Macro::get();
     setAnalyzeSpeed(1.f);
     // don't leave anchor checkpoints behind (practice mode would respawn at them)
-    if (auto pl = PlayLayer::get()) pl->removeAllCheckpoints();
-    m.anchors.clear();
+    dropAnchors();
     m.savedWindows.clear();
 
     int buckets[11] = {};
@@ -1495,8 +1508,7 @@ void onTestResolved() {
             m.speed = static_cast<float>(lower);
             setAnalyzeSpeed(m.speed);
             m.speedDrift = false;
-            m.anchors.clear(); // captured at the bad speed -> recapture at the new one
-            if (auto plc = PlayLayer::get()) plc->removeAllCheckpoints();
+            dropAnchors(); // captured at the bad speed -> recapture at the new one
             if (lower <= 1) {
                 m.speedPhase = false;
                 m.checkingSpeed = false;
@@ -1513,8 +1525,7 @@ void onTestResolved() {
             m.mode = Mode::Idle;
             setAnalyzeSpeed(1.f);
             resetSplit();
-            m.anchors.clear();
-            if (auto plc = PlayLayer::get()) plc->removeAllCheckpoints();
+            dropAnchors();
             FW_WARN("BASELINE FAIL stopped moving @ step {} (x {:.0f}) driftVsRecording={:.3f}u @step {}",
                 m.deathStep, m.lastCx, m.baseDriftMax, m.baseDriftStep);
             std::string msg;
@@ -1547,8 +1558,8 @@ void onTestResolved() {
             m.trackBase = false;
             setAnalyzeSpeed(m.speed);
             if (m.fastMode) {
-                m.capturingAnchors = true; m.nextAnchorCapture = 0; m.anchors.clear();
-                if (auto plc = PlayLayer::get()) plc->removeAllCheckpoints();
+                m.capturingAnchors = true; m.nextAnchorCapture = 0;
+                dropAnchors();
             }
             beginTest();
             return;
@@ -1749,10 +1760,11 @@ class $modify(MacroBGL, GJBaseGameLayer) {
         if (m.mode == Mode::Recording && m_player1) {
             auto pos = m_player1->getPosition();
             if (static_cast<int>(m.track.size()) <= m.step)
-                m.track.resize(m.step + 1, { pos.x, pos.y });
+                m.track.resize(m.step + 1, { kNoPos, kNoPos }); // skipped step indices stay unknown
             m.track[m.step] = { pos.x, pos.y };
         } else if (m.mode == Mode::Playing) {
-            if (m_player1 && m.step >= 0 && m.step < static_cast<int>(m.track.size())) {
+            if (m_player1 && m.step >= 0 && m.step < static_cast<int>(m.track.size())
+                && m.track[m.step].first != kNoPos) {
                 auto pos = m_player1->getPosition();
                 auto rec = m.track[m.step];
                 float dx = pos.x - rec.first, dy = pos.y - rec.second;
@@ -1777,14 +1789,14 @@ class $modify(MacroBGL, GJBaseGameLayer) {
             if (m.baseline && m.trackBase && m_player1) {
                 auto pos = m_player1->getPosition();
                 if (static_cast<int>(m.baseTrack.size()) <= m.step)
-                    m.baseTrack.resize(m.step + 1, { 0.f, 0.f, 0.f });
+                    m.baseTrack.resize(m.step + 1, { kNoPos, kNoPos, 0.f });
                 auto relMode = [](PlayerObject* p) {
                     return p && (p->m_isShip || p->m_isDart || p->m_isRobot);
                 };
                 uint8_t rel = (relMode(m_player1) ? 1 : 0) | (relMode(m_player2) ? 2 : 0);
                 m.baseTrack[m.step] = { pos.x, pos.y,
                     static_cast<float>(m_player1->m_yVelocity), rel };
-                if (m.step >= 0 && m.step < static_cast<int>(m.track.size())) {
+                if (m.step >= 0 && m.step < static_cast<int>(m.track.size()) && m.track[m.step].first != kNoPos) {
                     auto rec = m.track[m.step];
                     float dx = pos.x - rec.first, dy = pos.y - rec.second;
                     float d = std::sqrt(dx * dx + dy * dy);
@@ -1796,7 +1808,7 @@ class $modify(MacroBGL, GJBaseGameLayer) {
                 && m.step < static_cast<int>(m.baseTrack.size())) {
                 auto pos = m_player1->getPosition();
                 auto const& bt = m.baseTrack[m.step];
-                if (std::fabs(pos.x - bt.x) > 0.25f || std::fabs(pos.y - bt.y) > 0.25f) {
+                if (bt.x != kNoPos && (std::fabs(pos.x - bt.x) > 0.25f || std::fabs(pos.y - bt.y) > 0.25f)) {
                     m.speedDrift = true;
                     m.testResolved = true;
                     m.lastSurvived = false;
@@ -1813,6 +1825,10 @@ class $modify(MacroBGL, GJBaseGameLayer) {
                             && prev->second.step == m.step) {
                             m.anchors[m.nextAnchorCapture] = prev->second;
                         } else if (auto cp = plc->markCheckpoint()) {
+                            // keep it OUT of GD's list: with any checkpoint listed,
+                            // resetLevel() respawns there even in normal mode, so a
+                            // "restart from the start" would land mid-level
+                            if (plc->m_checkpointArray) plc->m_checkpointArray->removeObject(cp); // our Ref keeps it alive
                             Macro::Anchor a{ cp, plc->m_randomSeed, plc->m_replayRandSeed, m.step };
                             a.p1 = captureHeld(m_player1);
                             a.p2 = captureHeld(m_player2);
@@ -1843,7 +1859,7 @@ class $modify(MacroBGL, GJBaseGameLayer) {
             } else if (m.verifyingAnchor) {
                 if (!dead && m_player1 && m.step < static_cast<int>(m.baseTrack.size())) {
                     auto const& bt = m.baseTrack[m.step];
-                    if (std::fabs(cx - bt.x) > 0.1f || std::fabs(cy - bt.y) > 0.1f) {
+                    if (bt.x != kNoPos && (std::fabs(cx - bt.x) > 0.1f || std::fabs(cy - bt.y) > 0.1f)) {
                         if (m.driftLogs++ < 8) {
                             auto it = m.anchors.find(m.targetIdx);
                             int as = it != m.anchors.end() ? it->second.step : -1;
@@ -1899,6 +1915,7 @@ class $modify(MacroBGL, GJBaseGameLayer) {
             && static_cast<GJBaseGameLayer*>(PlayLayer::get()) == this)
             m_queuedButtons.clear();
 
+        if (g_levelCorrupt) return; // frozen after a GD error (see abortAnalysis)
         if (m.mode == Mode::Analyzing) {
             // Run tests back to back inside this frame until the time budget is
             // used (one test per frame made every run cost >= 1 rendered frame).
@@ -1914,7 +1931,8 @@ class $modify(MacroBGL, GJBaseGameLayer) {
                     FW_WARN("GD threw during a test run: '{}' input #{} offset {:.3f} restored={} inline={} step {}",
                         e.what(), m.targetIdx < m.targets.size() ? m.targets[m.targetIdx] : 0, m.offset,
                         m.restoredRun ? 1 : 0, m.testInline ? 1 : 0, m.step);
-                    abortAnalysis("Analysis stopped: GD hit an error during a test run.\nSend geode.log, please.");
+                    abortAnalysis("Analysis stopped: GD hit an error during a test run.\n"
+                                  "The level is frozen to avoid a crash: press Esc and exit it.\nSend geode.log, please.");
                     return;
                 }
                 if (!m.baseline) m.perfSim += msSince(ts);
@@ -2244,6 +2262,7 @@ class $modify(MacroPlayLayer, PlayLayer) {
         if (m.mode == Mode::Analyzing) setAnalyzeSpeed(1.f);
         m.mode = Mode::Idle;
         m.anchors.clear(); // never keep checkpoint refs from another level
+        g_levelCorrupt = false;
         resetSplit();
         g_acc = RecAcc{};
         if (macroEnabled()) m.loadForLevel(levelKeyFor(level));
@@ -2262,6 +2281,7 @@ class $modify(MacroPlayLayer, PlayLayer) {
     }
 
     void resetLevel() {
+        if (g_levelCorrupt) return; // frozen after a GD error: resetting would throw again
         auto& m = Macro::get();
         if (m.mode == Mode::Playing && m.step > 0) logPlaybackVerdict("died");
         PlayLayer::resetLevel();
@@ -2532,8 +2552,7 @@ $execute {
                 Macro::get().mode = Mode::Idle;
                 setAnalyzeSpeed(1.f);
                 resetSplit();
-                if (auto pl = PlayLayer::get()) pl->removeAllCheckpoints();
-                Macro::get().anchors.clear();
+                dropAnchors();
                 notify("Analyze: cancelled", NotificationIcon::Info);
             }
             else startAnalysis();
