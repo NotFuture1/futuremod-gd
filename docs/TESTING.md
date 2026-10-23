@@ -1,4 +1,4 @@
-# Testing the frame window counter (v1.15.1)
+# Testing the frame window counter (v1.15.3)
 
 Do the tests in order. Each one tells you what to look for, what counts as a
 pass, and what to send back. Everything the mod reports goes to `geode.log`
@@ -208,6 +208,10 @@ the bottom-right corner and the run doesn't save progress.
    and the one you're on. F6 again swaps back.
 
 Log lines: `[fw] LDM swap -> ...`.
+
+Click practice's decision logic is also tested without GD:
+`clang++ -std=c++20 -I src tests/practice_test.cpp -o pt && ./pt`
+(runs in CI on every push).
 
 ---
 

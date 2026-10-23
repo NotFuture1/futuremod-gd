@@ -39,6 +39,9 @@ std::vector<fw::Timing> const& levelTimings();
 // full macro), sorted by time. Empty = nothing recorded.
 std::vector<BotInput> const& botInputs();
 
+// Level time where botInputs()' macro begins (its start position; 0 = start).
+double botStart();
+
 // Press / release exactly as replay does.
 void applyBotInput(GJBaseGameLayer* layer, BotInput const& in);
 

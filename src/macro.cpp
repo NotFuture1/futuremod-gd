@@ -1961,6 +1961,8 @@ double now() { return attemptNow(); }
 
 std::vector<fw::Timing> const& levelTimings() { return ::levelTimings(); }
 
+static double g_botStart = 0.0;
+
 std::vector<BotInput> const& botInputs() {
     static std::vector<BotInput> cache;
     static std::string cacheKey;
@@ -1971,6 +1973,7 @@ std::vector<BotInput> const& botInputs() {
     cacheN = m.inputs.size();
     cache.clear();
     auto fill = [](Macro const& src) {
+        g_botStart = src.levelT0;
         for (auto const& in : src.inputs)
             cache.push_back({ in.t() + src.levelT0, in.button, in.down, in.player1, in.mask });
     };
@@ -1985,6 +1988,8 @@ std::vector<BotInput> const& botInputs() {
     std::stable_sort(cache.begin(), cache.end(), [](BotInput const& a, BotInput const& b) { return a.t < b.t; });
     return cache;
 }
+
+double botStart() { botInputs(); return g_botStart; }
 
 void applyBotInput(GJBaseGameLayer* layer, BotInput const& in) {
     InputEdge e;

@@ -5,7 +5,7 @@
         "mac": "2.2081",
         "android": "2.2081"
     },
-    "version": "v1.15.2",
+    "version": "v1.15.3",
     "id": "future.futuremod",
     "name": "Future Mod",
     "developer": "future",
@@ -182,9 +182,9 @@
         },
         "practice-margin": {
             "name": "Practice margin (frames)",
-            "description": "How long before and after a picked click you're in control (frames). Must be wider than the click's window; 12 is plenty for most.",
+            "description": "How long before and after a picked click you're in control (frames, 240 = 1 s). It never reaches over the neighbouring clicks on the same button (the bot plays those), so a big value is safe.",
             "type": "int",
-            "default": 12,
+            "default": 30,
             "min": 4,
             "max": 120
         },

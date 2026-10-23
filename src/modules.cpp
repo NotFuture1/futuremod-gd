@@ -1,6 +1,7 @@
 #include "common.hpp"
 #include "core.hpp"
 #include "display.hpp"
+#include "practice_logic.hpp"
 
 #include <Geode/Geode.hpp>
 #include <Geode/modify/GJBaseGameLayer.hpp>
@@ -149,21 +150,18 @@ void tickIndicator(PlayLayer* pl) {
 // Click practice
 // ---------------------------------------------------------------------------
 
-struct Owned {
-    double from, to;   // level clock: you're in control in here
-    int button;
-    int mask;          // players to release at the end if still held
-    bool player1;
-};
-
+// The decisions live in practice_logic.hpp (tested on its own in
+// tests/practice_test.cpp); this part only feeds it the level's data and
+// carries out what it says.
 struct Practice {
-    std::string key;                 // level the selection belongs to
-    std::vector<double> selected;    // level-clock times of picked presses
-    std::vector<Owned> owned;
-    std::vector<int> endedSync;      // owned[] already synced at their end
-    size_t ptr = 0;                  // next bot input to consider
-    double lastNow = -1e9;
-    bool dirty = true;
+    std::string key;               // level the selection belongs to
+    std::vector<double> selected;  // level-clock times of picked presses
+    fw::practice::Engine engine;
+    std::string engKey;            // what the engine was built from
+    size_t engN = static_cast<size_t>(-1);
+    double engMargin = -1.0;
+    bool selDirty = true;
+    bool warned = false;           // "picks don't match" said once per level
 };
 Practice g_prac;
 
@@ -184,7 +182,8 @@ void saveSelection() {
     std::string s;
     for (double t : g_prac.selected) s += fmt::format("{}{:.3f}", s.empty() ? "" : ",", t);
     Mod::get()->setSavedValue(selKey(), s);
-    g_prac.dirty = true;
+    g_prac.selDirty = true;
+    g_prac.warned = false;
 }
 
 bool isSelected(double t) {
@@ -197,71 +196,58 @@ void setSelected(double t, bool on) {
     if (on) { v.push_back(t); std::sort(v.begin(), v.end()); }
 }
 
-void rebuildOwned() {
-    if (!g_prac.dirty) return;
-    g_prac.dirty = false;
-    g_prac.owned.clear();
-    g_prac.endedSync.clear();
+// keep the engine in step with the level's macro, the picks and the margin
+void syncEngine() {
+    loadSelection();
     auto const& ins = fw::core::botInputs();
+    auto key = fw::core::baseKey();
+    if (g_prac.engKey != key || g_prac.engN != ins.size()) {
+        std::vector<fw::practice::Input> conv;
+        conv.reserve(ins.size());
+        for (auto const& b : ins) conv.push_back({ b.t, b.button, b.down, b.player1, b.mask });
+        g_prac.engine.setInputs(std::move(conv), fw::core::botStart());
+        g_prac.engKey = key;
+        g_prac.engN = ins.size();
+        g_prac.selDirty = true;
+    }
     double margin = static_cast<double>(Mod::get()->getSettingValue<int64_t>("practice-margin"));
-    for (double ts : g_prac.selected) {
-        // the recorded press at that time, and its release
-        for (size_t i = 0; i < ins.size(); i++) {
-            if (!ins[i].down || std::fabs(ins[i].t - ts) >= 0.75) continue;
-            double rel = ins[i].t;
-            for (size_t j = i + 1; j < ins.size(); j++)
-                if (ins[j].button == ins[i].button && ins[j].player1 == ins[i].player1) {
-                    if (!ins[j].down) rel = ins[j].t;
-                    break;
-                }
-            int mask = ins[i].mask ? ins[i].mask : (ins[i].player1 ? 1 : 2);
-            g_prac.owned.push_back({ ins[i].t - margin, rel + margin, ins[i].button, mask, ins[i].player1 });
-            break;
+    if (g_prac.selDirty || margin != g_prac.engMargin) {
+        g_prac.engine.setSelection(g_prac.selected, margin);
+        g_prac.selDirty = false;
+        g_prac.engMargin = margin;
+        if (!g_prac.selected.empty() && g_prac.engine.matched() == 0 && !g_prac.warned && !ins.empty()) {
+            g_prac.warned = true;
+            Notification::create("Click practice: your picked clicks don't match this level's macro.\n"
+                                 "Pick them again (pause menu > Practice).", NotificationIcon::Warning)->show();
         }
     }
-}
-
-Owned const* ownedAt(double t) {
-    for (auto const& o : g_prac.owned) if (t >= o.from && t <= o.to) return &o;
-    return nullptr;
 }
 
 bool practiceActive() {
     if (!practiceOn() || !fw::core::idle()) return false;
-    loadSelection();
-    return !g_prac.selected.empty() && !fw::core::botInputs().empty();
+    syncEngine();
+    return g_prac.engine.active();
 }
 
-// once per physics step, at the point GD applies inputs: the bot plays every
-// input outside your picked clicks; at the end of a picked click, anything you
-// still hold is let go so the bot continues from the recorded state
+// once per physics step, at the point GD applies inputs
 void practiceStep(GJBaseGameLayer* layer) {
-    rebuildOwned();
-    auto const& ins = fw::core::botInputs();
-    double now = fw::core::now();
-    if (now < g_prac.lastNow) { // new attempt / respawn
-        g_prac.ptr = static_cast<size_t>(std::lower_bound(ins.begin(), ins.end(), now - 0.5,
-            [](fw::core::BotInput const& a, double t) { return a.t < t; }) - ins.begin());
-        g_prac.endedSync.clear();
-    }
-    g_prac.lastNow = now;
-    while (g_prac.ptr < ins.size() && std::llround(ins[g_prac.ptr].t) <= std::llround(now)) {
-        auto const& in = ins[g_prac.ptr++];
-        if (!ownedAt(in.t)) fw::core::applyBotInput(layer, in);
-    }
-    for (size_t i = 0; i < g_prac.owned.size(); i++) {
-        auto const& o = g_prac.owned[i];
-        if (std::llround(o.to) != std::llround(now)) continue;
-        if (std::find(g_prac.endedSync.begin(), g_prac.endedSync.end(), static_cast<int>(i)) != g_prac.endedSync.end()) continue;
-        g_prac.endedSync.push_back(static_cast<int>(i));
-        PlayerObject* ps[2] = { layer->m_player1, layer->m_player2 };
+    PlayerObject* ps[2] = { layer->m_player1, layer->m_player2 };
+    auto holds = [&](int button, int mask) {
         for (int k = 0; k < 2; k++) {
-            if (!(o.mask & (1 << k)) || !ps[k]) continue;
-            auto it = ps[k]->m_holdingButtons.find(o.button);
-            if (it != ps[k]->m_holdingButtons.end() && it->second)
-                ps[k]->releaseButton(static_cast<PlayerButton>(o.button));
+            if (!(mask & (1 << k)) || !ps[k]) continue;
+            auto it = ps[k]->m_holdingButtons.find(button);
+            if (it != ps[k]->m_holdingButtons.end() && it->second) return true;
         }
+        return false;
+    };
+    auto out = g_prac.engine.step(fw::core::now(), holds);
+    for (size_t i : out.apply) {
+        auto const& in = g_prac.engine.input(i);
+        fw::core::applyBotInput(layer, { in.t, in.button, in.down, in.player1, in.mask });
     }
+    for (auto const& r : out.release)
+        for (int k = 0; k < 2; k++)
+            if ((r.mask & (1 << k)) && ps[k]) ps[k]->releaseButton(static_cast<PlayerButton>(r.button));
 }
 
 // The picker: every recorded press with its window; tick the ones to practice.
@@ -641,10 +627,9 @@ class $modify(FwModBGL, GJBaseGameLayer) {
     void handleButton(bool down, int button, bool isPlayer1) {
         // click practice: outside your picked clicks the bot plays; ignore you
         auto pl = PlayLayer::get();
-        if (pl && static_cast<GJBaseGameLayer*>(pl) == this && practiceActive()) {
-            rebuildOwned();
-            if (!ownedAt(fw::core::now())) return;
-        }
+        if (pl && static_cast<GJBaseGameLayer*>(pl) == this && practiceActive()
+            && !g_prac.engine.allowPlayer(fw::core::now(), button, isPlayer1))
+            return;
         GJBaseGameLayer::handleButton(down, button, isPlayer1);
     }
 };
@@ -654,8 +639,7 @@ class $modify(FwModPlayLayer, PlayLayer) {
         g_cheatedSession = false;
         if (!PlayLayer::init(level, useReplay, dontCreateObjects)) return false;
         markCheating(this);
-        g_prac.dirty = true;
-        g_prac.lastNow = -1e9;
+        g_prac.engine.reset();
         // LDM swap: back on the start position you were on
         if (g_swap.wantStartPos) {
             auto want = *g_swap.wantStartPos;
@@ -683,7 +667,9 @@ class $modify(FwModPlayLayer, PlayLayer) {
     void resetLevel() {
         PlayLayer::resetLevel();
         markCheating(this);
-        g_prac.lastNow = -1e9;
+        // every reset/respawn: the bot re-seeks to where you are (forgetting
+        // this made it skip everything before your last death -> no inputs)
+        g_prac.engine.reset();
     }
 };
 
