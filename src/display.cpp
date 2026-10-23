@@ -353,6 +353,7 @@ void tick(PlayLayer* pl) {
 }
 
 std::string windowText(double w) { return fmtWindow(w); }
+ccColor3B windowColour(double w) { return windowColor(w); }
 
 void clearDeathRings(PlayLayer* pl) {
     if (!pl) return;

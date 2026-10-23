@@ -42,5 +42,7 @@ void showDeath(PlayLayer* pl, std::vector<DeathRing> const& rings,
 void clearDeathRings(PlayLayer* pl);
 // a window as the rings label it ("3", "2.37")
 std::string windowText(double w);
+// the colour rings use for a window (red = tight ... green = loose)
+cocos2d::ccColor3B windowColour(double w);
 
 } // namespace fw::display

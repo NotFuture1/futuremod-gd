@@ -40,7 +40,6 @@ bool anyCheat() { return indicatorOn() || practiceOn() || ldmOn(); }
 bool g_cheatedSession = false;
 
 constexpr int kCheatLabelTag = 0x4D50434C; // 'MPCL'
-constexpr int kIndicatorTag  = 0x4D504349; // 'MPCI' (+ player index)
 
 void markCheating(PlayLayer* pl) {
     if (!pl) return;
@@ -65,100 +64,85 @@ void markCheating(PlayLayer* pl) {
 }
 
 // ---------------------------------------------------------------------------
-// Click indicator
+// Click indicator: a vertical line in the level at the dead centre of every
+// upcoming click's frame window. It scrolls with the level; your icon crossing
+// it is the moment to click. Placed with GD's own time->position conversion,
+// RELATIVE to where your icon is now (so a constant offset in that conversion
+// cancels out); this works for imported windows and from start positions too.
 // ---------------------------------------------------------------------------
 
-struct IndicatorNode {
-    CCNode* root = nullptr;
-    CCNode* approach = nullptr;
-    CCNode* targetIdle = nullptr;
-    CCNode* targetOn = nullptr;
-    CCLabelBMFont* label = nullptr;
-};
+constexpr int kLinesTag = 0x4D50434C + 7; // container on the PlayLayer
+constexpr int kMaxLines = 48;
 
-CCDrawNode* ring(float r, ccColor4F col, float width) {
-    auto d = CCDrawNode::create();
-    CCPoint v[48];
-    for (int i = 0; i < 48; i++) {
-        float a = i * 6.2831853f / 48.f;
-        v[i] = CCPoint(r * std::cos(a), r * std::sin(a));
+CCNode* linesLayer(PlayLayer* pl) {
+    auto n = pl->getChildByTag(kLinesTag);
+    if (!n) {
+        n = CCNode::create();
+        n->setTag(kLinesTag);
+        n->setID("click-indicator-lines"_spr);
+        pl->addChild(n, 9997); // above the level, under rings / HUD
     }
-    d->drawPolygon(v, 48, { 0, 0, 0, 0 }, width + 1.5f, { 0, 0, 0, col.a * 0.8f });
-    d->drawPolygon(v, 48, { 0, 0, 0, 0 }, width, col);
-    return d;
-}
-
-IndicatorNode indicatorFor(PlayLayer* pl, int k) {
-    IndicatorNode n;
-    n.root = pl->getChildByTag(kIndicatorTag + k);
-    if (!n.root) {
-        n.root = CCNode::create();
-        n.root->setTag(kIndicatorTag + k);
-        n.root->setID(fmt::format("click-indicator-{}"_spr, k + 1));
-        auto a = ring(11.f, { 1.f, 0.85f, 0.25f, 1.f }, 1.5f); a->setTag(1);
-        auto ti = ring(11.f, { 1.f, 1.f, 1.f, 0.6f }, 1.5f); ti->setTag(2);
-        auto to = ring(11.f, { 0.3f, 1.f, 0.45f, 1.f }, 3.f); to->setTag(3);
-        auto l = CCLabelBMFont::create(" ", "bigFont.fnt"); l->setTag(4);
-        l->setScale(0.3f);
-        l->setPosition({ 0.f, 20.f });
-        n.root->addChild(a); n.root->addChild(ti); n.root->addChild(to); n.root->addChild(l);
-        pl->addChild(n.root, 9999);
-    }
-    n.approach = n.root->getChildByTag(1);
-    n.targetIdle = n.root->getChildByTag(2);
-    n.targetOn = n.root->getChildByTag(3);
-    n.label = static_cast<CCLabelBMFont*>(n.root->getChildByTag(4));
     return n;
 }
 
 void hideIndicators(PlayLayer* pl) {
-    for (int k = 0; k < 2; k++)
-        if (auto n = pl->getChildByTag(kIndicatorTag + k)) n->setVisible(false);
+    if (auto n = pl->getChildByTag(kLinesTag)) n->setVisible(false);
+}
+
+// one line: a thin full-height bar + its window number at the top
+CCNode* lineNode(CCNode* layer, int i, float h) {
+    if (auto c = layer->getChildByTag(i)) return c;
+    auto node = CCNode::create();
+    node->setTag(i);
+    auto bar = CCLayerColor::create({ 255, 255, 255, 255 }, 2.f, h);
+    bar->ignoreAnchorPointForPosition(false);
+    bar->setAnchorPoint({ 0.5f, 0.f });
+    bar->setTag(1);
+    node->addChild(bar);
+    auto l = CCLabelBMFont::create(" ", "bigFont.fnt");
+    l->setScale(0.3f);
+    l->setAnchorPoint({ 0.5f, 1.f });
+    l->setPosition({ 0.f, h - 4.f });
+    l->setTag(2);
+    node->addChild(l);
+    layer->addChild(node);
+    return node;
 }
 
 void tickIndicator(PlayLayer* pl) {
     auto const& list = fw::core::levelTimings();
-    if (list.empty() || !pl->m_objectLayer) { hideIndicators(pl); return; }
+    auto p = pl->m_player1;
+    if (list.empty() || !pl->m_objectLayer || !p || p->m_isDead) { hideIndicators(pl); return; }
+    auto layer = linesLayer(pl);
+    layer->setVisible(true);
+    auto win = CCDirector::sharedDirector()->getWinSize();
     double now = fw::core::now();
-    double lead = static_cast<double>(Mod::get()->getSettingValue<int64_t>("indicator-lead"));
-    bool dual = pl->m_gameState.m_isDualMode;
-    bool anyP2 = std::any_of(list.begin(), list.end(), [](fw::Timing const& t) { return t.p2; });
-    PlayerObject* ps[2] = { pl->m_player1, pl->m_player2 };
-    for (int k = 0; k < 2; k++) {
-        auto p = ps[k];
-        bool wantP2 = k == 1;
-        if (!p || (k == 1 && !dual) || p->m_isDead) {
-            if (auto n = pl->getChildByTag(kIndicatorTag + k)) n->setVisible(false);
-            continue;
-        }
-        // the next timing of this player that isn't over yet
-        fw::Timing const* next = nullptr;
-        for (auto const& t : list) {
-            if (anyP2 && t.p2 != wantP2) continue;
-            if (t.t + t.hiEdge() >= now) { next = &t; break; }
-        }
-        auto n = indicatorFor(pl, k);
-        if (!next) { n.root->setVisible(false); continue; }
-        double start = next->t + next->loEdge(), end = next->t + next->hiEdge();
-        bool active = now >= start && now <= end;
-        double until = start - now;
-        if (!active && until > lead) { n.root->setVisible(false); continue; }
-        n.root->setVisible(true);
-        // follow the icon, a bit above it, with the camera zoom
-        auto world = p->getParent()->convertToWorldSpace(p->getPosition());
-        float zoom = std::fabs(pl->m_objectLayer->getScaleY());
-        n.root->setPosition(pl->convertToNodeSpace(world) + CCPoint(0.f, 34.f * zoom));
-        n.root->setScale(zoom);
-        float prog = active ? 0.f : static_cast<float>(std::clamp(until / lead, 0.0, 1.0));
-        n.approach->setVisible(!active);
-        n.approach->setScale(1.f + 2.f * prog);
-        n.targetIdle->setVisible(!active);
-        n.targetOn->setVisible(active);
-        std::string what = next->down == 0 ? "RELEASE" : "CLICK";
-        n.label->setString(active ? fmt::format("{} {}f", what, fw::display::windowText(next->w)).c_str()
-                                  : fmt::format("{}f", fw::display::windowText(next->w)).c_str());
-        n.label->setColor(active ? ccColor3B{ 90, 255, 120 } : ccColor3B{ 230, 230, 230 });
+    // where GD's model says "now" is vs where your icon really is
+    float baseX = pl->posForTime(static_cast<float>(now / 240.0)).x;
+    // the icon in level (object-layer) space, whatever its actual parent is
+    CCPoint icon = pl->m_objectLayer->convertToNodeSpace(p->getParent()->convertToWorldSpace(p->getPosition()));
+    int used = 0;
+    for (auto const& t : list) {
+        double centre = t.t + (t.loEdge() + t.hiEdge()) / 2.0;
+        if (centre < now - 8.0) continue; // already passed
+        float x = icon.x + (pl->posForTime(static_cast<float>(centre / 240.0)).x - baseX);
+        CCPoint screen = pl->convertToNodeSpace(pl->m_objectLayer->convertToWorldSpace({ x, icon.y }));
+        if (screen.x > win.width + 10.f) break; // further ones are off screen
+        if (screen.x < -10.f) continue;
+        if (used >= kMaxLines) break;
+        auto node = lineNode(layer, used++, win.height);
+        node->setVisible(true);
+        node->setPosition({ screen.x, 0.f });
+        auto col = fw::display::windowColour(t.w);
+        auto bar = static_cast<CCLayerColor*>(node->getChildByTag(1));
+        bar->setColor(col);
+        bar->setOpacity(t.down == 0 ? 110 : 220); // releases fainter
+        auto label = static_cast<CCLabelBMFont*>(node->getChildByTag(2));
+        label->setString(fw::display::windowText(t.w).c_str());
+        label->setColor(col);
     }
+    for (int i = used; i < kMaxLines; i++)
+        if (auto c = layer->getChildByTag(i)) c->setVisible(false);
 }
 
 // ---------------------------------------------------------------------------

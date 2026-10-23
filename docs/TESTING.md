@@ -1,4 +1,4 @@
-# Testing the frame window counter (v1.15.0)
+# Testing the frame window counter (v1.15.1)
 
 Do the tests in order. Each one tells you what to look for, what counts as a
 pass, and what to send back. Everything the mod reports goes to `geode.log`
@@ -195,7 +195,7 @@ If there's no sound, try **Sound file** = `playSound_01.ogg` in settings.
 Settings > **Cheat modules**. With any of them on, a red **CHEATING** label is in
 the bottom-right corner and the run doesn't save progress.
 
-1. **Click indicator**: on an analyzed level, play normally. A yellow ring
+1. **Click indicator**: on an analyzed level, play normally. Coloured lines in the level mark the centre of each window; click when your icon crosses one. (Old text: a yellow ring
    shrinks onto a white one above your icon as each click comes up, and it
    turns green with `CLICK` / `RELEASE` while you're inside its window.
 2. **Click practice**: needs a recorded macro for the level. Pause menu >
