@@ -1,4 +1,4 @@
-# Testing the frame window counter (v1.13.0)
+# Testing the frame window counter (v1.14.0)
 
 Do the tests in order. Each one tells you what to look for, what counts as a
 pass, and what to send back. Everything the mod reports goes to `geode.log`
@@ -182,6 +182,11 @@ If there's no sound, try **Sound file** = `playSound_01.ogg` in settings.
    listed there (set **NaNDL level name** if its name differs), otherwise a
    hint to analyze or import.
 5. Log lines: `[fw] DEATH ...` and `[fw] IMPORT ...`.
+6. Start positions (v1.14.0): put a start pos mid-level, play from it and die.
+   The banner should name the same click as dying there from the level start.
+   Record (J) + analyze (N) from the start pos: it gets its own macro, and the
+   log shows `[fw] LEVELCLOCK recording from start pos x ... = level frame ...`
+   (that frame / 240 should be about the seconds into the level the start pos is).
 
 ---
 

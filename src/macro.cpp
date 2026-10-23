@@ -149,6 +149,47 @@ std::string levelKeyFor(GJGameLevel* lvl) {
     return "local_" + sanitizeKey(std::string(lvl->m_levelName)); // local levels
 }
 
+// ---- the level clock -------------------------------------------------------
+// Every window is stored on GD's LEVEL clock: 240 Hz frames from the level's
+// real start, as GD itself computes it for a spot in the level (speed portals
+// included -- the same conversion it uses to start the song at a start pos).
+// So a click is at the same time whether you played from the start or from a
+// start position.
+double levelFramesAt(PlayLayer* pl, CCPoint pos) {
+    if (!pl) return 0.0;
+    double f = static_cast<double>(pl->timeForPos(pos, 0, 0, false, 0)) * 240.0;
+    if (!(f >= 0.0) || f > 1e8) { // NaN / nonsense: don't poison the clock
+        FW_WARN("LEVELCLOCK timeForPos({:.0f}, {:.0f}) gave {} -> using 0", pos.x, pos.y, f);
+        return 0.0;
+    }
+    return f;
+}
+
+// level time of where this attempt starts: 0 from the level start, else the
+// start position's spot on the level clock
+double startPosFrames(PlayLayer* pl) {
+    if (!pl || !pl->m_startPosObject) return 0.0;
+    return levelFramesAt(pl, pl->m_startPosObject->getPosition());
+}
+
+// Each start position gets its own macro (record/replay/analyze from there).
+std::string keyFor(PlayLayer* pl) {
+    if (!pl) return "unknown";
+    auto key = levelKeyFor(pl->m_level);
+    if (pl->m_startPosObject)
+        key += fmt::format("_sp{}", static_cast<int>(std::lround(pl->m_startPosObject->getPositionX())));
+    return key;
+}
+
+// the level a key belongs to (start-pos suffix removed)
+std::string baseKeyOf(std::string const& key) {
+    auto p = key.rfind("_sp");
+    if (p == std::string::npos) return key;
+    for (size_t i = p + 3; i < key.size(); i++)
+        if (!std::isdigit(static_cast<unsigned char>(key[i])) && key[i] != '-') return key;
+    return key.substr(0, p);
+}
+
 std::filesystem::path macrosDir() {
     auto d = Mod::get()->getSaveDir() / "macros";
     std::error_code ec;
@@ -232,6 +273,14 @@ struct Macro {
     // Per-click windows imported from a file (pause menu > Import) for levels
     // without our own analysis. Saved as macros/<key>.imported.json.
     std::vector<fw::Timing> imported;
+
+    // Level time (frames) of this macro's step 0: 0 from the level start, the
+    // start position's level time otherwise. step + levelT0 = level clock.
+    double levelT0 = 0.0;
+    // all of this level's windows (every start pos's analysis + imports),
+    // merged on the level clock; rebuilt lazily
+    std::vector<fw::Timing> levelSet;
+    bool levelSetDirty = true;
 
     // --- analyzer ---
     std::vector<size_t> targets;
@@ -377,7 +426,7 @@ struct Macro {
             if (sw.idx < 0 || sw.idx >= static_cast<int>(inputs.size())) continue;
             if (sw.status == static_cast<char>(WStatus::Wide) || sw.window <= 0.0) continue;
             auto const& in = inputs[sw.idx];
-            out.push_back({ in.t(), sw.window, !in.player1, sw.idx + 1 });
+            out.push_back({ in.t() + levelT0, sw.window, !in.player1, sw.idx + 1 });
         }
         if (fromAnalysis) *fromAnalysis = !out.empty();
         if (out.empty()) out = imported;
@@ -407,6 +456,7 @@ struct Macro {
 
     void save() {
         std::string out = fmt::format("FUTUREMOD_MACRO v3\n{} {}\n", seed1, seed2);
+        if (levelT0 != 0.0) out += fmt::format("T0 {:.6f}\n", levelT0); // start pos: level clock offset
         // the first four fields are the v2 format, so older builds still read it
         for (auto const& in : inputs)
             out += fmt::format("{} {} {} {} {:.9f} {} {}\n", in.step, in.button, in.player1 ? 1 : 0,
@@ -439,7 +489,10 @@ struct Macro {
     void loadForLevel(std::string const& key) {
         curKey = key;
         imported.clear();
-        if (auto imp = fw::timings::readFile(macrosDir() / (key + ".imported.json")); imp && !imp.unwrap().empty()) {
+        levelT0 = 0.0;
+        levelSetDirty = true;
+        // imports belong to the level, not to one start position
+        if (auto imp = fw::timings::readFile(macrosDir() / (baseKeyOf(key) + ".imported.json")); imp && !imp.unwrap().empty()) {
             imported = imp.unwrap();
             log::info("[macro] level '{}': {} imported frame windows", key, imported.size());
         }
@@ -462,6 +515,10 @@ struct Macro {
         int nMid = 0;
         while (std::getline(ss, line)) {
             if (line.empty()) continue;
+            if (line.rfind("T0 ", 0) == 0) {
+                levelT0 = std::strtod(line.c_str() + 3, nullptr);
+                continue;
+            }
             if (line[0] == 'D') {
                 std::istringstream sd(line);
                 std::string tag; int st; size_t n;
@@ -789,6 +846,7 @@ void stopRecording() {
         return;
     }
     m.savedWindows.clear(); // old windows belong to the old run
+    m.levelSetDirty = true;
     m.save();
     m.saveTrack();
     int nMid = 0;
@@ -1380,12 +1438,12 @@ void writeExports() {
         auto st = static_cast<WStatus>(sw.status);
         csv += fmt::format("{},{},{},{},{:.4f},{:.5f},{:.4f},{},{},{},{},{}\n",
             sw.idx, in.down ? "press" : "release", in.player1 ? 1 : 2, in.step, in.frac,
-            in.t() / 240.0, sw.window, opt(sw.lo), opt(sw.hi), statusName(st), optI(sw.tap), optI(sw.sub));
+            (in.t() + m.levelT0) / 240.0, sw.window, opt(sw.lo), opt(sw.hi), statusName(st), optI(sw.tap), optI(sw.sub));
         bool wide = st == WStatus::Wide;
         std::string win = wide ? "\"-\"" : fmtNum(sw.window);
         auto row = [&](size_t n) {
             return fmt::format("    {{ \"input\": {}, \"timePosition\": {}, \"frameWindow\": {}, \"isPlayer2\": {} }}",
-                n, fmtNum(in.t()), win, in.player1 ? "false" : "true");
+                n, fmtNum(in.t() + m.levelT0), win, in.player1 ? "false" : "true");
         };
         rowsAll.push_back(row(rowsAll.size() + 1));
         if (!wide) rowsFwc.push_back(row(rowsFwc.size() + 1));
@@ -1413,7 +1471,7 @@ void writeExports() {
             if (sw.idx < 0 || sw.idx >= static_cast<int>(m.inputs.size())) continue;
             if (static_cast<WStatus>(sw.status) == WStatus::Wide || sw.window <= 0.0) continue;
             auto const& in = m.inputs[sw.idx];
-            tl.push_back({ in.t(), sw.window, !in.player1, sw.idx + 1 });
+            tl.push_back({ in.t() + m.levelT0, sw.window, !in.player1, sw.idx + 1 });
         }
         if (!tl.empty()) {
             auto bytes = fw::timings::toFwc(tl);
@@ -1466,6 +1524,7 @@ void finishAnalysis() {
 
     m.save(); // persist windows so the live playback tally survives restarts
     writeExports();
+    m.levelSetDirty = true;
     updateHud(); // while still Analyzing, so the HUD shows the final counts
     m.mode = Mode::Idle;
     playDing();
@@ -1723,8 +1782,58 @@ void startAnalysis() {
 // ---------------------------------------------------------------------------
 namespace {
 
-std::vector<CCPoint> g_path[2]; // object-layer positions by level step (kNoPos = unknown)
+std::vector<CCPoint> g_path[2]; // object-layer positions by level-clock frame (kNoPos = unknown)
 bool g_deathShown = false;
+// this attempt on the level clock: where it started + steps since
+double g_attemptT0 = 0.0;
+long g_attemptSteps = 0;
+bool g_attemptInit = false;
+
+double attemptNow() { return g_attemptT0 + static_cast<double>(g_attemptSteps); }
+
+// a new attempt began (reset / respawn): from the level start the clock is 0;
+// from a start pos or a practice checkpoint, it's that spot's level time
+void startAttempt(PlayLayer* pl) {
+    g_attemptSteps = 0;
+    g_attemptInit = true;
+    bool fromStart = !pl->m_startPosObject
+        && !(pl->m_checkpointArray && pl->m_checkpointArray->count() > 0);
+    g_attemptT0 = (fromStart || !pl->m_player1) ? 0.0 : levelFramesAt(pl, pl->m_player1->getPosition());
+}
+
+// every window this level has, on the level clock: this macro's analysis,
+// every other start position's analysis (their exports), and imports --
+// merged, so dying anywhere finds its click whichever start it was measured from
+std::vector<fw::Timing> const& levelTimings() {
+    auto& m = Macro::get();
+    if (!m.levelSetDirty) return m.levelSet;
+    m.levelSetDirty = false;
+    std::vector<fw::Timing> all = m.timings(); // own analysis first (wins ties)
+    auto base = baseKeyOf(m.curKey);
+    std::error_code ec;
+    for (auto const& e : std::filesystem::directory_iterator(macrosDir(), ec)) {
+        auto name = e.path().filename().string();
+        auto suffix = std::string(".nandl.json");
+        if (name.size() <= suffix.size() || name.compare(name.size() - suffix.size(), suffix.size(), suffix) != 0) continue;
+        auto key = name.substr(0, name.size() - suffix.size());
+        if (key == m.curKey || baseKeyOf(key) != base) continue;
+        if (auto r = fw::timings::readFile(e.path())) {
+            auto const& v = r.unwrap();
+            all.insert(all.end(), v.begin(), v.end());
+        }
+    }
+    all.insert(all.end(), m.imported.begin(), m.imported.end());
+    std::stable_sort(all.begin(), all.end(), [](fw::Timing const& a, fw::Timing const& b) { return a.t < b.t; });
+    // the same click measured twice (two start positions overlap): keep one
+    m.levelSet.clear();
+    for (auto const& t : all) {
+        bool dup = false;
+        for (auto it = m.levelSet.rbegin(); it != m.levelSet.rend() && t.t - it->t < 0.75; ++it)
+            if (it->p2 == t.p2) { dup = true; break; }
+        if (!dup) m.levelSet.push_back(t);
+    }
+    return m.levelSet;
+}
 
 std::string deathMode() {
     return Mod::get()->getSettingValue<std::string>("death-windows");
@@ -1732,7 +1841,7 @@ std::string deathMode() {
 
 void recordPath(PlayLayer* pl) {
     if (!pl->m_objectLayer) return;
-    int st = static_cast<int>(std::llround(pl->m_gameState.m_levelTime * 240.0));
+    int st = static_cast<int>(std::llround(attemptNow()));
     if (st < 0 || st > 2'000'000) return;
     PlayerObject* ps[2] = { pl->m_player1, pl->m_player2 };
     for (int k = 0; k < 2; k++) {
@@ -1796,11 +1905,11 @@ void onDeath(PlayLayer* pl, PlayerObject* who) {
     bool all = mode == "All";
     float secs = static_cast<float>(Mod::get()->getSettingValue<double>("death-windows-seconds"));
     auto& m = Macro::get();
-    auto list = m.timings();
+    auto const& list = levelTimings();
     if (list.empty()) { showNandlFallback(pl, secs); return; }
 
     bool p2 = who && who == pl->m_player2;
-    double D = pl->m_gameState.m_levelTime * 240.0;
+    double D = attemptNow();
     constexpr double kTol = 2.0; // a click a hair after the death tick still counts
     // the click you died on: the last timing (of the player that died, if it
     // has any) at or just before the death
@@ -1918,9 +2027,12 @@ class $modify(MacroBGL, GJBaseGameLayer) {
         }
         GJBaseGameLayer::processCommands(dt, isHalfTick, isLastTick);
 
-        if ((m.mode == Mode::Idle || m.mode == Mode::Recording) && !fw::ghost::isSim()
-            && deathMode() != "Off") {
-            if (auto pl = PlayLayer::get(); pl && static_cast<GJBaseGameLayer*>(pl) == this) recordPath(pl);
+        if ((m.mode == Mode::Idle || m.mode == Mode::Recording) && !fw::ghost::isSim()) {
+            if (auto pl = PlayLayer::get(); pl && static_cast<GJBaseGameLayer*>(pl) == this) {
+                if (!g_attemptInit) startAttempt(pl);
+                g_attemptSteps++;
+                if (deathMode() != "Off") recordPath(pl);
+            }
         }
 
         if (m.mode == Mode::Recording && m_player1) {
@@ -2432,10 +2544,11 @@ class $modify(MacroPlayLayer, PlayLayer) {
         m.anchors.clear(); // never keep checkpoint refs from another level
         g_levelCorrupt = false;
         g_path[0].clear(); g_path[1].clear();
+        g_attemptInit = false;
         g_deathShown = false;
         resetSplit();
         g_acc = RecAcc{};
-        if (macroEnabled()) m.loadForLevel(levelKeyFor(level));
+        if (macroEnabled()) m.loadForLevel(keyFor(this));
         return true;
     }
 
@@ -2457,9 +2570,19 @@ class $modify(MacroPlayLayer, PlayLayer) {
             fw::display::clearDeathRings(this);
             g_deathShown = false;
         }
+        bool newAttemptClock = m.mode == Mode::Idle || m.mode == Mode::Recording;
         if (m.mode == Mode::Playing && m.step > 0) logPlaybackVerdict("died");
         PlayLayer::resetLevel();
         int cpCount = m_checkpointArray ? m_checkpointArray->count() : 0;
+        if (newAttemptClock) startAttempt(this);
+        // switched start position (e.g. a start pos switcher): its own macro
+        if (m.mode == Mode::Idle && macroEnabled()) {
+            auto k = keyFor(this);
+            if (k != m.curKey) {
+                log::info("[macro] start position changed -> '{}'", k);
+                m.loadForLevel(k);
+            }
+        }
         resetSplit();
         if (m.mode == Mode::Recording) {
             g_acc = RecAcc{};
@@ -2473,6 +2596,10 @@ class $modify(MacroPlayLayer, PlayLayer) {
                 m.seed1 = m_randomSeed;
                 m.seed2 = m_replayRandSeed;
                 m.haveSeed = true;
+                m.levelT0 = startPosFrames(this);
+                if (m.levelT0 != 0.0)
+                    FW_LOG("LEVELCLOCK recording from start pos x {:.0f} = level frame {:.1f}",
+                        m_startPosObject->getPositionX(), m.levelT0);
             }
         } else if (m.mode == Mode::Playing) {
             m.schedPos = 0;
@@ -2677,7 +2804,8 @@ class $modify(MacroPauseLayer, PauseLayer) {
             auto& m = Macro::get();
             if (m.curKey != key) return; // left the level meanwhile
             m.imported = list.unwrap();
-            auto save = file::writeString(macrosDir() / (key + ".imported.json"), fw::timings::toNandlJson(m.imported));
+            auto save = file::writeString(macrosDir() / (baseKeyOf(key) + ".imported.json"), fw::timings::toNandlJson(m.imported));
+            m.levelSetDirty = true;
             if (!save) log::warn("[fw] couldn't save imported windows: {}", save.unwrapErr());
             FW_LOG("IMPORT '{}' -> {} timings for {}", path.filename().string(), m.imported.size(), key);
             bool own = false;
@@ -2709,7 +2837,7 @@ class $modify(MacroPauseLayer, PauseLayer) {
             createQuickPopup("Macros", "Not in a level.", "OK", nullptr, [](auto, bool) {});
             return;
         }
-        std::string key = levelKeyFor(pl->m_level);
+        std::string key = keyFor(pl);
         auto res = file::readString(pathForKey(key));
         if (!res) {
             createQuickPopup("Macros",
