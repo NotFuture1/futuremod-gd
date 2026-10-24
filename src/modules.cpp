@@ -37,8 +37,11 @@ bool extenderOn() { return macroOn() && Mod::get()->getSettingValue<bool>("mod-w
 bool ldmOn() { return macroOn() && Mod::get()->getSettingValue<bool>("mod-ldm-swap"); }
 bool anyCheat() { return indicatorOn() || extenderOn() || ldmOn(); }
 
-// once a module was on during this level, the whole session is cheated
+// This attempt was played with a cheat module on. Per attempt: once every
+// module is off, the next attempt is legit again. (Frame windows on death,
+// the replay rings and the analyzer are not cheats and never set this.)
 bool g_cheatedSession = false;
+bool g_testModeOrig = false; // GD's own test mode (start pos) before we touched it
 
 constexpr int kCheatLabelTag = 0x4D50434C; // 'MPCL'
 
@@ -664,6 +667,7 @@ class $modify(FwModPlayLayer, PlayLayer) {
     bool init(GJGameLevel* level, bool useReplay, bool dontCreateObjects) {
         g_cheatedSession = false;
         if (!PlayLayer::init(level, useReplay, dontCreateObjects)) return false;
+        g_testModeOrig = m_isTestMode;
         markCheating(this);
         g_ext.engine.reset();
         // LDM swap: back on the start position you were on
@@ -691,6 +695,11 @@ class $modify(FwModPlayLayer, PlayLayer) {
     }
 
     void resetLevel() {
+        // a new attempt: legit again if no cheat module is on now
+        if (!anyCheat() && g_cheatedSession) {
+            g_cheatedSession = false;
+            m_isTestMode = g_testModeOrig;
+        }
         PlayLayer::resetLevel();
         markCheating(this);
         g_ext.engine.reset(); // new attempt: clicks behind you are done

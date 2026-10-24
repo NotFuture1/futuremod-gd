@@ -1879,41 +1879,12 @@ std::optional<CCPoint> pathAt(bool p2, double t) {
 }
 
 
-void showNandlFallback(PlayLayer* pl, float secs) {
-    std::string name = pl->m_level ? std::string(pl->m_level->m_levelName) : std::string();
-    auto show = [secs](std::optional<fw::nandl::LevelInfo> info) {
-        auto pl2 = PlayLayer::get();
-        if (!pl2) return;
-        std::vector<std::string> lines;
-        if (info) {
-            lines.push_back(fmt::format("NaN's windows for {}", info->name));
-            lines.push_back(fmt::format("{} inputs, {:.0f}s, precision {:.1f}", info->inputs, info->length, info->precision));
-            std::string h;
-            for (size_t k = 0; k < info->hist.size(); k++) {
-                if (info->hist[k] < 0.05) continue;
-                if (!h.empty()) h += "   ";
-                h += fmt::format("{}f: {:.1f}", k, info->hist[k]);
-            }
-            if (!h.empty()) lines.push_back(h);
-            lines.push_back("(NaNDL only lists totals, not which click is which)");
-        } else {
-            lines.push_back("No frame windows for this level");
-            lines.push_back("Analyze it (your Analyze key) or Import a file (pause menu)");
-        }
-        fw::display::showDeath(pl2, {}, lines, secs);
-    };
-    if (!Mod::get()->getSettingValue<bool>("death-nandl")) { show(std::nullopt); return; }
-    if (auto c = fw::nandl::cached(name)) { show(c); return; }
-    fw::nandl::lookup(name, show);
-}
-
 void onDeath(PlayLayer* pl, PlayerObject* who) {
     auto mode = deathMode();
     bool all = mode == "All";
-    constexpr float secs = 4.f; // only the NaNDL fallback shows text
     auto& m = Macro::get();
     auto const& list = levelTimings();
-    if (list.empty()) { showNandlFallback(pl, secs); return; }
+    if (list.empty()) return; // no per-click windows: nothing to ring
 
     bool p2 = who && who == pl->m_player2;
     double D = attemptNow();
@@ -1940,7 +1911,7 @@ void onDeath(PlayLayer* pl, PlayerObject* who) {
     }
 
     if (died >= 0) g_lastDiedOn = list[died].t;
-    fw::display::showDeath(pl, rings, {}, secs); // just the ring(s), no info box
+    fw::display::showDeath(pl, rings); // just the ring(s), no text
     FW_LOG("DEATH levelStep={:.0f} diedOn={} window={} passed={}/{}", D, died >= 0 ? list[died].input : -1,
         died >= 0 ? list[died].w : -1.0, passed, list.size());
 }

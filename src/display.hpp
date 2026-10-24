@@ -35,10 +35,9 @@ struct DeathRing {
     double window;
     bool highlight;            // the click you died on
 };
-// Rings at the given spots + a banner (first line big, the rest small) that
-// fades out after `seconds`. Rings stay until clearDeathRings (next attempt).
-void showDeath(PlayLayer* pl, std::vector<DeathRing> const& rings,
-               std::vector<std::string> const& lines, float seconds);
+// Rings at the given spots (object-layer positions), nothing else. They stay
+// until clearDeathRings (the next attempt).
+void showDeath(PlayLayer* pl, std::vector<DeathRing> const& rings);
 void clearDeathRings(PlayLayer* pl);
 // a window as the rings label it ("3", "2.37")
 std::string windowText(double w);

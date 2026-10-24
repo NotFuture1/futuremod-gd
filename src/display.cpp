@@ -15,7 +15,6 @@ namespace {
 constexpr int kRingLayerTag = 0x4D505247; // 'MPRG'
 constexpr int kCounterTag   = 0x4D504643; // 'MPFC'
 constexpr int kDeathLayerTag  = 0x4D504452; // 'MPDR' death rings
-constexpr int kDeathBannerTag = 0x4D504442; // 'MPDB' death banner
 constexpr size_t kMaxRings  = 160;        // dense spam sections: drop the oldest
 constexpr float kRingRadius = 13.f;
 constexpr float kRowScale   = 0.5f;
@@ -360,8 +359,7 @@ void clearDeathRings(PlayLayer* pl) {
     if (auto l = pl->getChildByTag(kDeathLayerTag)) l->removeAllChildrenWithCleanup(true);
 }
 
-void showDeath(PlayLayer* pl, std::vector<DeathRing> const& rings,
-               std::vector<std::string> const& lines, float seconds) {
+void showDeath(PlayLayer* pl, std::vector<DeathRing> const& rings) {
     if (!pl) return;
     clearDeathRings(pl);
     auto layer = pl->getChildByTag(kDeathLayerTag);
@@ -378,34 +376,6 @@ void showDeath(PlayLayer* pl, std::vector<DeathRing> const& rings,
         layer->addChild(ring, d.highlight ? 1 : 0); // died-on drawn on top; size = Ring size
         place(pl, layer, ring, size);
     }
-
-    // banner, top centre: first line big, the rest small; fades by itself
-    if (auto old = pl->getChildByTag(kDeathBannerTag)) old->removeFromParent();
-    if (lines.empty()) return;
-    auto win = CCDirector::sharedDirector()->getWinSize();
-    auto box = CCNode::create();
-    box->setTag(kDeathBannerTag);
-    box->setID("frame-window-death-banner"_spr);
-    float y = 0.f, maxW = 0.f;
-    std::vector<CCLabelBMFont*> labels;
-    for (size_t i = 0; i < lines.size(); i++) {
-        auto l = CCLabelBMFont::create(lines[i].c_str(), "bigFont.fnt");
-        l->setScale(i == 0 ? 0.5f : 0.32f);
-        if (i > 0) l->setColor({ 210, 210, 210 });
-        l->setAnchorPoint({ 0.5f, 1.f });
-        l->setPosition({ 0.f, y });
-        y -= l->getScaledContentSize().height + 3.f;
-        maxW = std::max(maxW, l->getScaledContentSize().width);
-        labels.push_back(l);
-    }
-    auto bg = CCLayerColor::create({ 0, 0, 0, 140 }, maxW + 16.f, -y + 10.f);
-    bg->setPosition({ -(maxW + 16.f) / 2.f, y - 5.f });
-    box->addChild(bg, 0);
-    for (auto l : labels) box->addChild(l, 1);
-    box->setPosition({ win.width / 2.f, win.height - 30.f });
-    pl->addChild(box, 10001);
-    // stays across the respawn, then goes away by itself
-    box->runAction(CCSequence::create(CCDelayTime::create(std::max(0.5f, seconds)), CCRemoveSelf::create(), nullptr));
 }
 
 } // namespace fw::display
