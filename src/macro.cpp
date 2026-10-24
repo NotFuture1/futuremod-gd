@@ -1928,6 +1928,8 @@ namespace fw::core {
 
 bool idle() { return Macro::get().mode == Mode::Idle; }
 
+bool replaying() { return Macro::get().mode == Mode::Playing; }
+
 double now() { return attemptNow(); }
 
 std::vector<fw::Timing> const& levelTimings() { return ::levelTimings(); }

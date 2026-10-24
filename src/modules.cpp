@@ -35,11 +35,22 @@ bool macroOn() { return Mod::get()->getSettingValue<bool>("macro-enabled"); }
 bool indicatorOn() { return macroOn() && Mod::get()->getSettingValue<bool>("mod-click-indicator"); }
 bool extenderOn() { return macroOn() && Mod::get()->getSettingValue<bool>("mod-window-extender"); }
 bool ldmOn() { return macroOn() && Mod::get()->getSettingValue<bool>("mod-ldm-swap"); }
-bool anyCheat() { return indicatorOn() || extenderOn() || ldmOn(); }
+// forward: defined with the extender below
+bool extenderHelping();
 
-// This attempt was played with a cheat module on. Per attempt: once every
-// module is off, the next attempt is legit again. (Frame windows on death,
-// the replay rings and the analyzer are not cheats and never set this.)
+// Is something changing or playing this run right now? Only things actually
+// in use count: a macro replay (the bot plays), the click indicator showing
+// lines, the window extender helping. NOT cheats: LDM instaswap, recording,
+// frame windows on death, the replay rings, the analyzer (its runs never
+// complete a level), or merely having macro features enabled.
+bool cheatingNow() {
+    if (fw::core::replaying()) return true;
+    if (indicatorOn() && fw::core::idle() && !fw::core::levelTimings().empty()) return true;
+    return extenderHelping();
+}
+
+// This attempt had cheating in it. Per attempt: when nothing is in use, the
+// next attempt is legit again.
 bool g_cheatedSession = false;
 bool g_testModeOrig = false; // GD's own test mode (start pos) before we touched it
 
@@ -47,8 +58,7 @@ constexpr int kCheatLabelTag = 0x4D50434C; // 'MPCL'
 
 void markCheating(PlayLayer* pl) {
     if (!pl) return;
-    bool on = anyCheat();
-    if (on) {
+    if (cheatingNow()) {
         g_cheatedSession = true;
         pl->m_isTestMode = true; // GD's start-pos mode: progress isn't saved
     }
@@ -230,6 +240,12 @@ void syncExtender() {
         help.push_back({ t.t, t.loEdge(), t.hiEdge(), t.down != 0, t.p2 });
     }
     g_ext.engine.setTimings(std::move(help), X);
+}
+
+bool extenderHelping() {
+    if (!extenderOn() || !fw::core::idle()) return false;
+    syncExtender();
+    return g_ext.engine.active();
 }
 
 bool extenderActive(GJBaseGameLayer* layer) {
@@ -695,8 +711,8 @@ class $modify(FwModPlayLayer, PlayLayer) {
     }
 
     void resetLevel() {
-        // a new attempt: legit again if no cheat module is on now
-        if (!anyCheat() && g_cheatedSession) {
+        // a new attempt: legit again if nothing is in use now
+        if (!cheatingNow() && g_cheatedSession) {
             g_cheatedSession = false;
             m_isTestMode = g_testModeOrig;
         }

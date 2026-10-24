@@ -18,6 +18,9 @@ namespace fw::core {
 // player is playing normally.
 bool idle();
 
+// The macro is replaying (K): the bot is playing the run.
+bool replaying();
+
 // This attempt's current step on the level clock (inside a physics step: that
 // step's number, same convention as the windows' times).
 double now();

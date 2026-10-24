@@ -5,7 +5,7 @@
         "mac": "2.2081",
         "android": "2.2081"
     },
-    "version": "v1.16.1",
+    "version": "v1.16.2",
     "id": "future.futuremod",
     "name": "Future Mod",
     "developer": "future",
@@ -45,7 +45,7 @@
         },
         "macro-play": {
             "name": "Replay",
-            "description": "Replay the recorded macro, with frame window rings if it has been analyzed.",
+            "description": "Replay the recorded macro, with frame window rings if it has been analyzed. A replay is the bot playing: it's marked CHEATING and never saves progress.",
             "type": "keybind",
             "category": "gameplay",
             "default": "K"
@@ -159,18 +159,18 @@
             "default": ""
         },
         "cheat-title": {
-            "name": "Cheat modules (runs with these on don't count)",
+            "name": "Cheat modules (CHEATING shows only while one is in use)",
             "type": "title"
         },
         "mod-click-indicator": {
             "name": "Click indicator",
-            "description": "CHEAT. A line in the level at the dead centre of every upcoming click's frame window (coloured by the window, red = tight; releases fainter). It scrolls with the level: click when your icon crosses it. Uses the level's analyzed windows (your analysis or an import). While any cheat module is on, the run is marked CHEATING and doesn't save progress.",
+            "description": "CHEAT. A line in the level at the dead centre of every upcoming click's frame window (coloured by the window, red = tight; releases fainter). It scrolls with the level: click when your icon crosses it. Uses the level's analyzed windows (your analysis or an import). While it's showing lines, the attempt is marked CHEATING and doesn't save progress.",
             "type": "bool",
             "default": false
         },
         "mod-window-extender": {
             "name": "Window extender",
-            "description": "CHEAT. Makes the clicks you're NOT practicing easier, so you can focus on the ones you are. You still play every click yourself: if you're early or late by at most 'Extra frames' outside a click's real frame window, the click is moved into the window and you survive; further off and you die like normal. Late clicks are caught by the game briefly holding at the window's last frame (never longer than the extra frames). Pick the clicks to practice with NO help in the pause menu > Extender. Uses the level's frame windows (analysis or import). Marks the run as CHEATING.",
+            "description": "CHEAT. Makes the clicks you're NOT practicing easier, so you can focus on the ones you are. You still play every click yourself: if you're early or late by at most 'Extra frames' outside a click's real frame window, the click is moved into the window and you survive; further off and you die like normal. Late clicks are caught by the game briefly holding at the window's last frame (never longer than the extra frames). Pick the clicks to practice with NO help in the pause menu > Extender. Uses the level's frame windows (analysis or import). While it's helping, the attempt is marked CHEATING and doesn't save progress.",
             "type": "bool",
             "default": false
         },
@@ -184,7 +184,7 @@
         },
         "mod-ldm-swap": {
             "name": "LDM instaswap",
-            "description": "CHEAT. Bind a level to its LDM / ULDM version (pause menu > LDM), then press the key to swap between them instantly. The LDM version's own start positions are removed and replaced with the ones from the level you're on, and you stay on the start position you were on. Marks the run as CHEATING.",
+            "description": "Bind a level to its LDM / ULDM version (pause menu > LDM), then press the key to swap between them instantly. The LDM version's own start positions are removed and replaced with the ones from the level you're on, and you stay on the start position you were on.",
             "type": "bool",
             "default": false
         },
