@@ -1,8 +1,9 @@
 # Slopes converter: plan
 
-Turn a level's spike-based wave parts into **slope corridors** that trace
-the path, like the community's "… but slopes" levels. Status: **plan only**,
-nothing built yet.
+Turn a level's spike-based wave parts into **solid black slope corridors**
+that follow the gap between the spikes, like the community's "… but
+slopes" levels. Status: **plan only** (decisions in section 9), nothing
+built yet.
 
 ---
 
@@ -20,10 +21,9 @@ They use three different techniques.
 
 All three are made by hand, with the creator eyeballing the path.
 
-**"Shadow" levels:** I couldn't confirm what you mean. On GD's servers,
-"shadow wave" levels (e.g. 73968038) are just nerfed Sonic Wave copies. My
-guess is the blackout style in the second row. **Send me the ID of one you
-mean** and I'll take it apart the same way.
+**The look we're going for** (your answer): like Sonic Wave, but each wave
+part's decoration and spikes are replaced by **black slopes**. That combines
+the slope tunnel (row 1) with the blackout (row 2).
 
 ## 2. What we have that they didn't
 
@@ -36,57 +36,71 @@ if it gets through untouched, the walls are in the right place.
 It can also read and write level data (the LDM swap already does), and find
 out at runtime which objects are hazards, without a hand-kept ID list.
 
-## 3. What you get
+## 3. What you get (decided)
 
-Pause menu > **Slopes**, on a level you've recorded (the macro supplies the
-path):
+Pause menu > **Slopes**, on a level you've recorded:
 
-1. Pick a style:
-   - **Slope tunnel:** the wave parts' spikes are replaced with a slope
-     corridor along the path. Playable: the wave slides along the walls,
-     so it's the forgiving "but slopes" version.
-   - **Guide overlay:** the level stays as it is; passable slopes and a
-     path line show the route on top of the spikes.
-   - **Shadow** (once we've pinned down what it means): decoration blacked
-     out, with only the corridor/path visible.
-2. Corridor height (tight / normal / wide), and wave parts only vs. every
-   game mode (later phase).
-3. **Build:** it plays immediately, as an in-memory copy like the LDM swap,
-   and checks itself by replaying your macro through it (section 6).
+- **Wave parts only, always.** Every other part of the level is left exactly
+  as it is.
+- In each wave part, **all decoration and spikes are gone**. The corridor is
+  rebuilt as **solid black slopes** that follow **the real gap between the
+  spikes**, with black filling everything outside it. Like Sonic Wave, but
+  the wave parts are black slope silhouettes on the level's own background.
+- **Solid:** the wave slides along the walls, as in the "but slopes"
+  levels. Nothing see-through.
+- It plays straight away (an in-memory copy, like the LDM swap) and checks
+  itself (section 6).
 
 ## 4. The conversion, step by step
 
-1. **Find the wave parts.** Record the game mode with the path every step
-   (wave, mini, gravity, dual) and take the stretches where player 1 is a
-   wave. Today's recording stores only x/y, so this is a small addition.
-2. **Simplify the path** into straight pieces. A wave only moves three
-   ways: up, down, or sliding flat along a floor or ceiling. That gives a
-   list of corner points.
-   - Normal wave: **45°**. Mini wave: about **63°** (2 up per 1 across).
-   - I believe the angle doesn't change with speed portals. To be confirmed
-     by measuring a recorded path.
-3. **Build the walls.**
-   - Offset the path up and down by half the corridor height.
-   - Tile each wall line with slopes: 1×1 at 45°, 2:1 turned upright at
-     63°, and flat blocks for sliding stretches. Pieces go at exact
-     positions, not snapped to the grid, with the last piece of a run
-     scaled to fit.
-   - Corners get the corner piece the community uses: the four-slope
-     diamond.
-4. **Fill behind the walls** so the corridor reads clearly (Silent Slopes
-   style): one stretched block per column, using 2.2's separate X/Y scale,
-   to keep the object count low.
-5. **Remove the old hazards** in those stretches: spikes, saws, hazard
-   hitboxes. Identified by asking GD for each object's type, not by ID.
-   **Kept:** portals, speed changes, orbs, pads and **every trigger**.
-   Moving spikes (move triggers) get flagged rather than guessed at.
-6. **Assemble the new level:** the original data with those objects removed
-   and the new ones appended, built the same way as the LDM swap's copy.
+The walls come from **the level's spikes**, not from a fixed distance
+around your path. Your recorded path is only used for three things: where
+the wave parts are, which side of each spike row is the inside of the
+corridor, and the final check.
 
-The geometry is the core: it takes a path and settings and returns a list of
-objects to place. It gets written GD-free, like the window extender, with a
-test suite that also **draws each result to an image**, so the corridors
-can be checked by eye before anything runs in GD.
+1. **Find the wave parts.** Record the game mode every step (wave, mini,
+   gravity, dual) and take the stretches where player 1 is a wave. Today's
+   recording stores only x/y, so this is a small addition. The converter
+   then works only on what lies within those x ranges.
+2. **Collect what's in the way:** every hazard and solid block in those
+   stretches, as its **real hitbox**. GD gives each object's box at runtime,
+   rotated ones included, so spike sizes and rotations don't need a
+   hand-made table. Hitboxes, not the drawn spike, because your path may
+   graze a spike's drawn tip without dying. Walls on the drawn tips could
+   block it.
+3. **Measure the gap.** At every point of your path, look straight down to
+   the nearest hitbox (the floor) and straight up (the ceiling). That gives
+   the gap the level actually leaves, along the whole stretch.
+4. **Turn each edge into a slope line.**
+   - A spike row's edge is jagged (a narrow hitbox per spike), so the floor
+     edge becomes the line **connecting the spike tips facing the
+     corridor**. Same for the ceiling.
+   - That line is snapped to the angles GD slopes come in: 45° (1×1), the
+     2:1 slope lying flat or standing up (about 27° or 63°, the 63° being
+     mini wave's angle), and flat.
+   - Two rules for every point of your path: the wall **never crosses into
+     the gap**, and it keeps at least the wave's own half-size of clearance
+     from your path. The result is the spike corridor's own shape, in
+     slopes.
+5. **Build:**
+   - The slopes are placed at exact positions (not grid-snapped) and scaled
+     to fit each run, with diamond pieces where two runs meet at a corner.
+   - Everything outside the corridor gets black fill: one stretched block
+     per column, to keep the object count low.
+   - All of it uses GD's built-in **black** colour (special colour 1010),
+     so colour triggers can't tint it.
+6. **Clear out the wave parts:** remove spikes, saws, solid blocks and
+   decoration there. GD is asked what each object is (no ID list).
+   - **Kept:** portals, speed changes, orbs, pads and every trigger.
+   - **Skipped and reported:** anything moved by a trigger (moving spikes,
+     platforms). Converting those would break the level.
+7. **Assemble the level:** the original data with those objects removed and
+   the new ones appended, built like the LDM swap's copy.
+
+The geometry is the core: path samples plus hitboxes go in, the list of
+slopes and fill comes out. It gets written GD-free, like the window
+extender, with tests that also **draw each corridor to an image**: the
+original hitboxes, your path, and the new slopes on top of each other.
 
 ## 5. Copy protection
 
@@ -105,20 +119,20 @@ would be a way around the creator's copy lock.
 - **Compare with 104911684:** run our converter on Sonic Wave and put the
   result next to that hand-built tunnel.
 
-## 7. Phases
+## 7. Phases (wave only, always)
 
-1. **v1, normal and mini wave.** Slope tunnel and guide overlay, the
-   self-check, in-memory play.
-2. **v2, the awkward cases.** Dual (a second corridor, merged where they
-   overlap), gravity and size portals mid-section, teleports, reverse
-   gameplay. Plus saving as an editable level where allowed.
-3. **v3, other game modes.** Ship, UFO and swing paths are curves, so
-   approximate them with the three slope angles plus flat pieces. That
-   gives "but slopes" versions of non-wave parts too.
-4. **v4, corridors from the frame windows.** Instead of a fixed height,
-   shape each corridor from how far each click could actually be off (our
-   analysis). The walls then show the real room you have: tight where the
-   timing is tight.
+1. **v1:**
+   - normal and mini wave, gravity flips, speed changes;
+   - recording the game mode with the path;
+   - the gap measurement, slope fitting and black fill;
+   - the replay self-check, and in-memory play.
+2. **v2:**
+   - dual wave (two corridors, merged where they overlap);
+   - wave parts with teleport portals;
+   - saving as an editable level where allowed (free copy or your own).
+3. **v3:** wave parts that include moving spikes or platforms: convert
+   them where the movement can be followed, or leave just those objects in
+   place.
 
 ## 8. Risks / unknowns
 
@@ -128,14 +142,17 @@ would be a way around the creator's copy lock.
 - **Collision on scaled slopes:** I believe it follows the scale, since the
   hand-built tunnel uses scale 1.25. Also to be confirmed in v1.
 - **Wave parts built from moving objects or teleports:** removing hazards
-  there could break the level. v1 skips those sections and says so.
+  there could break the level. v1 skips those objects and says so.
+- **Spikes that slant off-grid:** the tip-line approach assumes that each
+  spike's hitbox corner facing the corridor marks the edge. Rotated spikes
+  give a box at an angle, and the corner nearest the path is used. Checked
+  on the images in the tests.
 
-## 9. Questions for you
+## 9. Decided (2026-10-24)
 
-1. **"Shadow":** a level ID of one you mean.
-2. **Tunnel:** should it be solid (the wave slides on it, so it's easier),
-   or only a visual guide over the original spikes? Or both as options, as
-   planned above.
-3. **Default corridor:** tight, about the wave's own size, or the
-   community's roughly 2-block tunnel?
-4. **Scope for v1:** wave only, or should ship be in v1 as well?
+1. **Look:** like Sonic Wave, but each wave part's decoration and spikes
+   become **black slopes**.
+2. **Solid** slopes. Nothing see-through.
+3. **The corridor is the real gap between the spikes**, not a chosen
+   height.
+4. **Wave parts only, always.**
