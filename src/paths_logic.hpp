@@ -107,11 +107,11 @@ inline Run thin(Run const& r, double step = 4.0) {
     for (size_t i = 1; i + 1 < r.size(); i++) {
         auto const& a = out.back();
         double dx = r[i].x - a.x, dy = r[i].y - a.y;
-        bool far = dx * dx + dy * dy >= step * step;
+        bool farEnough = dx * dx + dy * dy >= step * step; // (not "far": a macro on Windows)
         // turning point: the vertical direction changes here
         double d1 = r[i].y - r[i - 1].y, d2 = r[i + 1].y - r[i].y;
         bool turn = (d1 > 1e-4 && d2 < -1e-4) || (d1 < -1e-4 && d2 > 1e-4);
-        if (far || turn) out.push_back(r[i]);
+        if (farEnough || turn) out.push_back(r[i]);
     }
     out.push_back(r.back());
     return out;
