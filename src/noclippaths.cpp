@@ -7,6 +7,8 @@
 #include <Geode/modify/PlayLayer.hpp>
 #include <Geode/modify/LevelEditorLayer.hpp>
 #include <Geode/modify/EditorPauseLayer.hpp>
+#include <Geode/modify/EditorUI.hpp>
+#include <Geode/ui/BasedButtonSprite.hpp>
 #include <Geode/ui/Popup.hpp>
 
 #include <cstring>
@@ -252,7 +254,12 @@ class NoclipPathsPopup : public geode::Popup {
         Mod::get()->setSettingValue<bool>("noclip-paths-show", !showOn());
         if (auto spr = static_cast<ButtonSprite*>(static_cast<CCMenuItemSpriteExtra*>(sender)->getNormalImage()))
             spr->setString(showOn() ? "Hide" : "Show");
-        refreshView(LevelEditorLayer::get());
+        auto ed = LevelEditorLayer::get();
+        refreshView(ed);
+        // the editor's own PATH button follows
+        if (ed && ed->m_editorUI)
+            if (auto btn = typeinfo_cast<CCMenuItemToggler*>(ed->m_editorUI->getChildByIDRecursive("noclip-paths-button"_spr)))
+                btn->toggle(showOn());
     }
 
     void onClear(CCObject*) {
@@ -334,6 +341,50 @@ class $modify(NpEditor, LevelEditorLayer) {
         if (!LevelEditorLayer::init(level, noUI)) return false;
         refreshView(this);
         return true;
+    }
+};
+
+// A toggle in the editor itself (top-left, next to undo / redo): cyan while
+// the paths are shown, gray while hidden.
+class $modify(NpEditorUI, EditorUI) {
+    static CCNode* pathsIcon(bool on) {
+        auto label = CCLabelBMFont::create("PATH", "bigFont.fnt");
+        label->setScale(0.35f);
+        auto spr = EditorButtonSprite::create(label, on ? EditorBaseColor::Cyan : EditorBaseColor::Gray);
+        spr->setScale(0.8f);
+        return spr;
+    }
+
+    bool init(LevelEditorLayer* editorLayer) {
+        if (!EditorUI::init(editorLayer)) return false;
+        if (!Mod::get()->getSettingValue<bool>("macro-enabled")) return true;
+        auto toggle = CCMenuItemToggler::create(pathsIcon(false), pathsIcon(true), this,
+            menu_selector(NpEditorUI::onTogglePaths));
+        toggle->setID("noclip-paths-button"_spr);
+        toggle->toggle(showOn());
+        if (auto menu = this->getChildByID("undo-menu")) {
+            // Node IDs lays this row out: it lands right after hide-UI
+            menu->addChild(toggle);
+            menu->updateLayout();
+        } else {
+            // without Node IDs: our own little menu under the undo buttons
+            auto menu2 = CCMenu::create();
+            menu2->addChild(toggle);
+            auto win = CCDirector::sharedDirector()->getWinSize();
+            menu2->setPosition({ 26.f, win.height - 80.f });
+            this->addChild(menu2, 10);
+        }
+        return true;
+    }
+
+    void onTogglePaths(CCObject*) {
+        // (the toggler flips its own look after this call)
+        bool show = !showOn();
+        Mod::get()->setSettingValue<bool>("noclip-paths-show", show);
+        refreshView(m_editorLayer);
+        if (show && m_editorLayer && loadRuns(levelKey(m_editorLayer->m_level)).empty())
+            Notification::create("No noclip runs for this level yet: play it with noclip on first",
+                NotificationIcon::Info)->show();
     }
 };
 

@@ -1,4 +1,4 @@
-# Testing the frame window counter (v1.17.0)
+# Testing the frame window counter (v1.17.1)
 
 Do the tests in order. Each one tells you what to look for, what counts as a
 pass, and what to send back. Everything the mod reports goes to `geode.log`
@@ -221,7 +221,7 @@ The window extender's decision logic is also tested without GD:
    An attempt with no hazard touches (or a real death) isn't kept.
 2. Open that level in the editor: your runs are drawn on it. Where they
    agree you see one bright line; a run that went somewhere else is faint.
-3. Editor pause menu > **Noclip paths**: run count, Show/Hide, Clear runs.
+3. The **PATH** button in the editor (top-left, after undo / redo / delete / hide-UI) shows or hides them: cyan = shown, gray = hidden. Editor pause menu > **Noclip paths**: run count, Clear runs.
 
 ---
 
