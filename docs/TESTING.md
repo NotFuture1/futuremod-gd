@@ -1,4 +1,4 @@
-# Testing the frame window counter (v1.16.2)
+# Testing the frame window counter (v1.17.0)
 
 Do the tests in order. Each one tells you what to look for, what counts as a
 pass, and what to send back. Everything the mod reports goes to `geode.log`
@@ -211,6 +211,17 @@ Log lines: `[fw] LDM swap -> ...`.
 The window extender's decision logic is also tested without GD:
 `clang++ -std=c++20 -I src tests/assist_test.cpp -o at && ./at`
 (runs in CI on every push).
+
+---
+
+## Step 4f: Noclip paths (v1.17.0)
+
+1. Play one of your own levels (normal or practice) with noclip on, touching
+   some spikes, 3+ times. Each such attempt logs `[fw] NOCLIP run kept ...`.
+   An attempt with no hazard touches (or a real death) isn't kept.
+2. Open that level in the editor: your runs are drawn on it. Where they
+   agree you see one bright line; a run that went somewhere else is faint.
+3. Editor pause menu > **Noclip paths**: run count, Show/Hide, Clear runs.
 
 ---
 

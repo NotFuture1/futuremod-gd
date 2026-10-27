@@ -8,7 +8,7 @@ on:
   workflow_dispatch:
 
 jobs:
-  # Logic that doesn't need GD (window extender engine) is tested on its own.
+  # Logic that doesn't need GD (window extender, path averaging) is tested on its own.
   tests:
     name: Host tests
     runs-on: ubuntu-latest
@@ -19,6 +19,10 @@ jobs:
         run: |
           g++ -std=c++20 -Wall -Wextra -I src tests/assist_test.cpp -o assist_test
           ./assist_test
+      - name: Noclip path averaging
+        run: |
+          g++ -std=c++20 -Wall -Wextra -I src tests/paths_test.cpp -o paths_test
+          ./paths_test
 
   build:
     name: Build Windows

@@ -21,6 +21,9 @@ bool idle();
 // The macro is replaying (K): the bot is playing the run.
 bool replaying();
 
+// The macro is recording (J): you're playing, it's writing your inputs down.
+bool recording();
+
 // This attempt's current step on the level clock (inside a physics step: that
 // step's number, same convention as the windows' times).
 double now();

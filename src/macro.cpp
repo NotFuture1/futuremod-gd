@@ -1930,6 +1930,8 @@ bool idle() { return Macro::get().mode == Mode::Idle; }
 
 bool replaying() { return Macro::get().mode == Mode::Playing; }
 
+bool recording() { return Macro::get().mode == Mode::Recording; }
+
 double now() { return attemptNow(); }
 
 std::vector<fw::Timing> const& levelTimings() { return ::levelTimings(); }

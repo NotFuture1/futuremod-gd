@@ -5,7 +5,7 @@
         "mac": "2.2081",
         "android": "2.2081"
     },
-    "version": "v1.16.2",
+    "version": "v1.17.0",
     "id": "future.futuremod",
     "name": "Future Mod",
     "developer": "future",
@@ -157,6 +157,30 @@
             "description": "The level's name on nandl.pages.dev, if it differs from its name in GD. Leave blank to use the GD name. Used by the NaNDL comparison after an analysis and by the pause menu NaNDL button.",
             "type": "string",
             "default": ""
+        },
+        "paths-title": {
+            "name": "Noclip paths (editor, not a cheat)",
+            "type": "title"
+        },
+        "noclip-paths": {
+            "name": "Record noclip runs",
+            "description": "While you play a level (normal or practice mode), your path is recorded. An attempt where you touched a hazard without dying (noclip on) is kept. In that level's editor, all kept runs are drawn on the level: bright where you usually go, fading the further a run strays from that. Use it to buff the level around how you actually play. Editor pause menu > Noclip paths to show / hide / clear.",
+            "type": "bool",
+            "default": true
+        },
+        "noclip-paths-show": {
+            "name": "Show in the editor",
+            "description": "Draw the recorded noclip runs in the level's editor.",
+            "type": "bool",
+            "default": true
+        },
+        "noclip-paths-keep": {
+            "name": "Runs kept per level",
+            "description": "Only the most recent runs are kept (and averaged).",
+            "type": "int",
+            "default": 30,
+            "min": 1,
+            "max": 200
         },
         "cheat-title": {
             "name": "Cheat modules (CHEATING shows only while one is in use)",
