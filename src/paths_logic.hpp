@@ -16,6 +16,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <utility>
 #include <vector>
 
 namespace fw::paths {
@@ -96,6 +97,55 @@ inline float weight(Stats const& s, Pt p, double minSpread = 4.0, float alone = 
     double scale = std::max(static_cast<double>(s.spread[b]), minSpread);
     double d = (p.y - s.centre[b]) / scale;
     return static_cast<float>(std::exp(-0.5 * d * d));
+}
+
+// Is this point an outlier? Far (more than `z` spreads) from the middle of
+// the runs there, where at least `minRuns` runs pass so the middle means
+// something.
+inline bool isOutlierPoint(Stats const& s, Pt p, double z = 3.0, double minSpread = 4.0, int minRuns = 3) {
+    int b = s.bin(p.x);
+    if (!s.has(b) || s.count[b] < minRuns) return false;
+    double scale = std::max(static_cast<double>(s.spread[b]), minSpread);
+    return std::fabs(p.y - s.centre[b]) > z * scale;
+}
+
+// Drop whole runs that are outliers for more than `maxFrac` of the stretch
+// they share with the others (a run that took a different route, or played
+// that part completely differently). One brief wobble doesn't drop a run;
+// isOutlierPoint() hides those moments when drawing. Two passes, because
+// removing a far-off run tightens the middle the others are judged by.
+// Never drops below `keepAtLeast` runs.
+inline std::vector<Run> removeOutlierRuns(std::vector<Run> runs, double binW = 3.0, double maxFrac = 0.3,
+                                          double z = 3.0, size_t keepAtLeast = 2) {
+    for (int pass = 0; pass < 2 && runs.size() > keepAtLeast; pass++) {
+        Stats s = aggregate(runs, binW);
+        std::vector<std::pair<double, size_t>> bad; // (outlier fraction, run index)
+        for (size_t r = 0; r < runs.size(); r++) {
+            int judged = 0, off = 0;
+            for (auto const& p : runs[r]) {
+                int b = s.bin(p.x);
+                if (!s.has(b) || s.count[b] < 3) continue;
+                judged++;
+                if (isOutlierPoint(s, p, z)) off++;
+            }
+            double frac = judged > 0 ? static_cast<double>(off) / judged : 0.0;
+            if (judged >= 20 && frac > maxFrac) bad.push_back({ frac, r });
+        }
+        if (bad.empty()) break;
+        // worst first, but keep at least `keepAtLeast`
+        std::sort(bad.begin(), bad.end(), [](auto const& a, auto const& b) { return a.first > b.first; });
+        std::vector<char> drop(runs.size(), 0);
+        size_t remaining = runs.size();
+        for (auto const& b : bad) {
+            if (remaining <= keepAtLeast) break;
+            drop[b.second] = 1;
+            remaining--;
+        }
+        std::vector<Run> kept;
+        for (size_t r = 0; r < runs.size(); r++) if (!drop[r]) kept.push_back(std::move(runs[r]));
+        runs = std::move(kept);
+    }
+    return runs;
 }
 
 // Fewer points to draw: keep a point when it's at least `step` units from the

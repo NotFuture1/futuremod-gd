@@ -100,6 +100,45 @@ static void test_thin_keeps_shape() {
     CHECK(peaks >= 7, "zigzag peaks kept: %d", peaks);
 }
 
+static void test_outlier_run_dropped() {
+    std::puts("a run that went somewhere else most of the way is dropped");
+    std::vector<Run> runs;
+    for (int i = 0; i < 6; i++) runs.push_back(line(0, 900, [i](double) { return 100.0 + i * 0.7; }));
+    runs.push_back(line(0, 900, [](double x) { return x < 200 ? 101.0 : 220.0; })); // other route after x=200
+    auto kept = removeOutlierRuns(runs);
+    CHECK(kept.size() == 6, "kept %zu of 7", kept.size());
+}
+
+static void test_brief_wobble_kept() {
+    std::puts("a run with one short wobble is kept (only that moment is an outlier)");
+    std::vector<Run> runs;
+    for (int i = 0; i < 6; i++) runs.push_back(line(0, 900, [i](double) { return 100.0 + i * 0.7; }));
+    runs.push_back(line(0, 900, [](double x) { return (x > 400 && x < 440) ? 180.0 : 101.0; }));
+    auto kept = removeOutlierRuns(runs);
+    CHECK(kept.size() == 7, "kept %zu of 7", kept.size());
+    auto s = aggregate(kept);
+    CHECK(isOutlierPoint(s, { 420, 180.f }), "the wobble itself is an outlier point");
+    CHECK(!isOutlierPoint(s, { 300, 101.f }), "the rest of that run isn't");
+}
+
+static void test_keeps_at_least_two() {
+    std::puts("never drops below two runs, and leaves a 50/50 split alone");
+    std::vector<Run> runs;
+    runs.push_back(line(0, 600, [](double) { return 100.0; }));
+    runs.push_back(line(0, 600, [](double) { return 300.0; }));
+    auto kept = removeOutlierRuns(runs);
+    CHECK(kept.size() == 2, "kept %zu", kept.size());
+}
+
+static void test_partial_reset_runs_not_outliers() {
+    std::puts("runs you reset early (short) agree with the rest -> kept");
+    std::vector<Run> runs;
+    for (int i = 0; i < 4; i++) runs.push_back(line(0, 1200, [i](double x) { return 100.0 + x * 0.05 + i; }));
+    for (int i = 0; i < 4; i++) runs.push_back(line(0, 150.0 + i * 100, [i](double x) { return 101.0 + x * 0.05 + i * 0.5; }));
+    auto kept = removeOutlierRuns(runs);
+    CHECK(kept.size() == 8, "kept %zu of 8", kept.size());
+}
+
 static void test_empty() {
     std::puts("no runs: nothing breaks");
     auto s = aggregate({});
@@ -114,6 +153,10 @@ int main() {
     test_partial_runs_from_practice();
     test_run_counts_once_per_slice();
     test_thin_keeps_shape();
+    test_outlier_run_dropped();
+    test_brief_wobble_kept();
+    test_keeps_at_least_two();
+    test_partial_reset_runs_not_outliers();
     test_empty();
     std::printf("\n%d passed, %d failed\n", g_pass, g_fail);
     return g_fail ? 1 : 0;

@@ -18,12 +18,15 @@ using namespace geode::prelude;
 
 // ===========================================================================
 // Noclip paths. While you play a level (normal or practice), your path is
-// recorded; an attempt in which you touched a hazard without dying (noclip
-// on) is kept. In the editor every kept run is drawn on the level: bright
-// where it's close to the middle of all your runs there, fading the further
-// it strays -- so you see where you actually go, and how consistently, to
-// buff the level around it. The averaging is in paths_logic.hpp (tested on
-// its own). Not a cheat: it only records and draws.
+// recorded; every attempt that didn't end in a real death is kept, however
+// it ended (reset key, finishing, quitting). With noclip on you never really
+// die, so that's every noclip attempt; with it off, deaths are left out.
+// In the editor the kept runs are drawn on the level: bright where it's close
+// to the middle of all your runs there, fading the further it strays -- so
+// you see where you actually go, and how consistently, to buff the level
+// around it. Runs that went somewhere else most of the way are left out, and
+// brief far-off moments aren't drawn. The averaging is in paths_logic.hpp
+// (tested on its own). Not a cheat: it only records and draws.
 // ===========================================================================
 
 namespace {
@@ -36,7 +39,7 @@ bool recordOn() {
 }
 bool showOn() { return Mod::get()->getSettingValue<bool>("noclip-paths-show"); }
 size_t keepRuns() {
-    return static_cast<size_t>(std::clamp<int64_t>(Mod::get()->getSettingValue<int64_t>("noclip-paths-keep"), 1, 200));
+    return static_cast<size_t>(std::clamp<int64_t>(Mod::get()->getSettingValue<int64_t>("noclip-paths-keep"), 1, 500));
 }
 
 // same key as the macros (online: ID, local: name), without start position
@@ -106,7 +109,9 @@ void saveRuns(std::string const& key, std::vector<Run> const& runs) {
 struct Recorder {
     std::string key;
     Run pts;
-    int touches = 0; // hazard touches that didn't kill (noclip)
+    int touches = 0;   // hazard touches that didn't kill (noclip), for the log
+    bool died = false; // a real death this attempt: not kept
+    bool ended = false; // finished: the end animation isn't play
 };
 Recorder g_rec;
 
@@ -115,17 +120,28 @@ bool recordingAllowed() {
     return recordOn() && (fw::core::idle() || fw::core::recording());
 }
 
-void finishRun(char const* why) {
-    if (!g_rec.key.empty() && g_rec.touches > 0 && g_rec.pts.size() >= 120) {
-        auto runs = loadRuns(g_rec.key);
-        runs.push_back(fw::paths::thin(g_rec.pts, 2.0));
-        while (runs.size() > keepRuns()) runs.erase(runs.begin());
-        saveRuns(g_rec.key, runs);
-        FW_LOG("NOCLIP run kept ({}): {} points, {} hazard touches, {} runs for {}",
-            why, g_rec.pts.size(), g_rec.touches, runs.size(), g_rec.key);
+constexpr size_t kMinPoints = 240; // 1 s of play (240 steps a second)
+
+// The attempt is over (reset key, respawn, finish, quit). Safe to call more
+// than once: the second call has nothing left.
+void finishRun(char const* why, bool deadNow) {
+    if (!g_rec.key.empty() && !g_rec.pts.empty()) {
+        if (g_rec.died || deadNow) {
+            FW_LOG("NOCLIP run skipped ({}): ended in a real death", why);
+        } else if (g_rec.pts.size() < kMinPoints) {
+            FW_VLOG("NOCLIP run skipped ({}): only {} points", why, g_rec.pts.size());
+        } else {
+            auto runs = loadRuns(g_rec.key);
+            runs.push_back(fw::paths::thin(g_rec.pts, 2.0));
+            while (runs.size() > keepRuns()) runs.erase(runs.begin());
+            saveRuns(g_rec.key, runs);
+            FW_LOG("NOCLIP run kept ({}): {} points, x {:.0f}..{:.0f}, {} hazard touches, {} runs for {}",
+                why, g_rec.pts.size(), g_rec.pts.front().x, g_rec.pts.back().x, g_rec.touches, runs.size(), g_rec.key);
+        }
     }
     g_rec.pts.clear();
     g_rec.touches = 0;
+    g_rec.died = false;
 }
 
 // ---- editor display ---------------------------------------------------------
@@ -153,6 +169,7 @@ private:
 
     bool init(std::vector<Run> runs) {
         if (!CCNode::init()) return false;
+        runs = fw::paths::removeOutlierRuns(std::move(runs), 3.0);
         m_stats = fw::paths::aggregate(runs, 3.0);
         for (auto& r : runs) m_runs.push_back(fw::paths::thin(r, 3.0));
         this->scheduleUpdate();
@@ -168,7 +185,9 @@ private:
                 auto const& b = r[i];
                 double mx = 0.5 * (a.x + b.x);
                 if (mx < x0 || mx >= x1) continue;
-                float w = fw::paths::weight(m_stats, { static_cast<float>(mx), 0.5f * (a.y + b.y) });
+                Pt mid{ static_cast<float>(mx), 0.5f * (a.y + b.y) };
+                if (fw::paths::isOutlierPoint(m_stats, mid)) continue; // a brief far-off moment: not drawn
+                float w = fw::paths::weight(m_stats, mid);
                 float alpha = 0.06f + 0.84f * w;
                 // premultiplied colour (CCDrawNode blends that way)
                 ccColor4F col{ 0.35f * alpha, 0.9f * alpha, 1.f * alpha, alpha };
@@ -243,11 +262,14 @@ class NoclipPathsPopup : public geode::Popup {
     }
 
     void refresh() {
-        size_t n = m_key.empty() ? 0 : loadRuns(m_key).size();
+        auto runs = m_key.empty() ? std::vector<Run>{} : loadRuns(m_key);
+        size_t n = runs.size();
+        size_t out = n - fw::paths::removeOutlierRuns(std::move(runs), 3.0).size();
+        std::string left = out ? fmt::format(" ({} left out: went elsewhere)", out) : "";
         m_info->setString(n == 0
             ? "No noclip runs for this level yet.\nPlay it with noclip on, then come back."
-            : fmt::format("{} noclip run{} recorded for this level.\nBright = where you usually go.",
-                n, n == 1 ? "" : "s").c_str());
+            : fmt::format("{} noclip run{} recorded{}.\nBright = where you usually go.",
+                n, n == 1 ? "" : "s", left).c_str());
     }
 
     void onToggle(CCObject* sender) {
@@ -289,8 +311,9 @@ class $modify(NpBGL, GJBaseGameLayer) {
     void processCommands(float dt, bool isHalfTick, bool isLastTick) {
         GJBaseGameLayer::processCommands(dt, isHalfTick, isLastTick);
         auto pl = PlayLayer::get();
-        if (!pl || static_cast<GJBaseGameLayer*>(pl) != this || !recordingAllowed()) return;
+        if (!pl || static_cast<GJBaseGameLayer*>(pl) != this || !recordingAllowed() || g_rec.ended) return;
         auto p = m_player1;
+        if (p && p->m_isDead) g_rec.died = true;
         if (!p || p->m_isDead || !p->getParent() || !m_objectLayer) return;
         auto pos = m_objectLayer->convertToNodeSpace(p->getParent()->convertToWorldSpace(p->getPosition()));
         g_rec.pts.push_back({ pos.x, pos.y });
@@ -313,25 +336,46 @@ class $modify(NpPlayLayer, PlayLayer) {
 
     void destroyPlayer(PlayerObject* p, GameObject* obj) {
         PlayLayer::destroyPlayer(p, obj);
-        // touched a hazard and still alive = a noclip touch (GD's own
-        // anti-cheat spike and far-away objects don't count)
-        if (!recordingAllowed() || !p || p->m_isDead || !obj || obj == m_anticheatSpike) return;
-        if (ccpDistance(obj->getPosition(), p->getPosition()) > 120.f) return;
-        g_rec.touches++;
+        if (!p) return;
+        if (p->m_isDead) { g_rec.died = true; return; } // a real death (either player)
+        // touched a hazard and still alive = a noclip touch (only for the
+        // log; GD's own anti-cheat spike doesn't count)
+        if (obj && obj != m_anticheatSpike) g_rec.touches++;
     }
 
+    bool deadNow() {
+        return (m_player1 && m_player1->m_isDead) || (m_player2 && m_player2->m_isDead && m_gameState.m_isDualMode);
+    }
+
+    // Every way an attempt can end: the reset key / pause > restart (either
+    // kind), the respawn after a death, finishing, quitting. Whichever runs
+    // first keeps the run; the rest find nothing left.
     void resetLevel() {
-        finishRun("restart");
+        finishRun("restart", deadNow());
+        g_rec.ended = false;
         PlayLayer::resetLevel();
     }
 
+    void resetLevelFromStart() {
+        finishRun("restart", deadNow());
+        g_rec.ended = false;
+        PlayLayer::resetLevelFromStart();
+    }
+
+    void fullReset() {
+        finishRun("restart", deadNow());
+        g_rec.ended = false;
+        PlayLayer::fullReset();
+    }
+
     void levelComplete() {
-        finishRun("complete");
+        finishRun("complete", false);
+        g_rec.ended = true;
         PlayLayer::levelComplete();
     }
 
     void onQuit() {
-        finishRun("quit");
+        finishRun("quit", deadNow());
         PlayLayer::onQuit();
     }
 };

@@ -214,13 +214,18 @@ The window extender's decision logic is also tested without GD:
 
 ---
 
-## Step 4f: Noclip paths (v1.17.0)
+## Step 4f: Noclip paths (v1.18.0)
 
-1. Play one of your own levels (normal or practice) with noclip on, touching
-   some spikes, 3+ times. Each such attempt logs `[fw] NOCLIP run kept ...`.
-   An attempt with no hazard touches (or a real death) isn't kept.
-2. Open that level in the editor: your runs are drawn on it. Where they
-   agree you see one bright line; a run that went somewhere else is faint.
+1. Play one of your own levels (normal or practice) with noclip on, 3+
+   times. End some attempts with your **reset key** partway through and let
+   one finish. Each attempt over 1 second logs `[fw] NOCLIP run kept
+   (restart|complete|quit) ...`. Turn noclip off and die once: that logs
+   `NOCLIP run skipped (restart): ended in a real death`.
+2. Open that level in the editor: your runs are drawn on it, the reset ones
+   up to where you reset. Where they agree you see one bright line; a run
+   that strays a bit is faint. Play one attempt deliberately on a different
+   route: it isn't drawn at all, and the pause menu > Noclip paths popup says
+   `(1 left out: went elsewhere)`.
 3. The **PATH** button in the editor (top-left, after undo / redo / delete / hide-UI) shows or hides them: cyan = shown, gray = hidden. Editor pause menu > **Noclip paths**: run count, Clear runs.
 
 ---

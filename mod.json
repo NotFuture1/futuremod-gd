@@ -5,7 +5,7 @@
         "mac": "2.2081",
         "android": "2.2081"
     },
-    "version": "v1.17.1",
+    "version": "v1.18.0",
     "id": "future.futuremod",
     "name": "Future Mod",
     "developer": "future",
@@ -164,7 +164,7 @@
         },
         "noclip-paths": {
             "name": "Record noclip runs",
-            "description": "While you play a level (normal or practice mode), your path is recorded. An attempt where you touched a hazard without dying (noclip on) is kept. In that level's editor, all kept runs are drawn on the level: bright where you usually go, fading the further a run strays from that. Use it to buff the level around how you actually play. Editor pause menu > Noclip paths to show / hide / clear.",
+            "description": "While you play a level (normal or practice mode), your path is recorded. Every attempt that doesn't end in a real death is kept, however it ends: reset key, finishing or quitting (with noclip on, that's every attempt; attempts under 1 second aren't). In that level's editor, all kept runs are drawn on the level: bright where you usually go, fading the further a run strays from that. A run that went somewhere else for most of the way is left out, and brief far-off moments aren't drawn. Use it to buff the level around how you actually play. Editor pause menu > Noclip paths to show / hide / clear.",
             "type": "bool",
             "default": true
         },
@@ -176,11 +176,11 @@
         },
         "noclip-paths-keep": {
             "name": "Runs kept per level",
-            "description": "Only the most recent runs are kept (and averaged).",
+            "description": "Only the most recent runs are kept (and averaged). Runs you reset early count too, so keep this well above the number of full runs you want.",
             "type": "int",
-            "default": 30,
+            "default": 100,
             "min": 1,
-            "max": 200
+            "max": 500
         },
         "cheat-title": {
             "name": "Cheat modules (CHEATING shows only while one is in use)",
