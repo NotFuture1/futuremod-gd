@@ -230,6 +230,26 @@ The window extender's decision logic is also tested without GD:
 
 ---
 
+## Step 4g: Recording in practice mode, CBF on (v1.19.0)
+
+1. Practice mode, CBF on. Press **J** to record. Any old practice
+   checkpoints are cleared, so the macro starts at the start (log:
+   `RECORD start: clearing N practice checkpoints`).
+2. Play a wave or ship part and die on purpose a few times right after a
+   checkpoint, some of them while holding. Let go during the death.
+3. Every respawn logs:
+   `[fw] PRACTICE respawn: macro back to step S (N inputs), players restored
+   exactly (GD's restore was off by dx ... dy ... dvy ...), K hold fix(es)`.
+   The `dx/dy/dvy` numbers show how far GD's own checkpoint was off.
+   `hold fix(es)` is 1 when you died holding.
+   ❌ `PRACTICE respawn at a checkpoint the recorder never saw` means the
+   respawn couldn't be rewound. Send the log.
+4. Finish, press **J**, then **K** (Step 2's check). Pass:
+   `VERDICT=EXACT`, with no `PLAYBACK first off at step` line near a
+   checkpoint's step.
+
+---
+
 ## Step 5: Run it twice (determinism)
 
 Press **N** again on the same macro and let it finish. Compare the two

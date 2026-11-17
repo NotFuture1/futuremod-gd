@@ -4,11 +4,13 @@
 #include "nandl.hpp"
 #include "timings.hpp"
 #include "core.hpp"
+#include "player_snap.hpp"
 
 #include <Geode/Geode.hpp>
 #include <Geode/modify/GJBaseGameLayer.hpp>
 #include <Geode/modify/PlayLayer.hpp>
 #include <Geode/modify/PlayerObject.hpp>
+#include <Geode/modify/CheckpointObject.hpp>
 #include <Geode/modify/PauseLayer.hpp>
 #include <Geode/modify/FMODAudioEngine.hpp>
 #include <Geode/loader/SettingV3.hpp>
@@ -107,6 +109,9 @@ struct InputEdge {
     // Which players GD actually pushed for this input (bit0 = P1, bit1 = P2),
     // captured at record time. 0 = unknown (older macro): fall back to P1/P2.
     int mask = 0;
+    // Not a click: added where a practice respawn let go of (or pressed) a
+    // button, so the replay does the same there. Never analyzed.
+    bool fix = false;
     double t() const { return step + frac; }
 };
 
@@ -261,8 +266,6 @@ struct Macro {
     int maxDriftStep = -1;
     bool finishedNotified = false;
     bool verdictLogged = false;
-
-    std::unordered_map<CheckpointObject*, int> cpStep;
 
     // The exact player-1 update deltas CBF used for each step it split while
     // recording (step -> deltas, one more than that step's mid-step inputs).
@@ -462,8 +465,8 @@ struct Macro {
         if (levelT0 != 0.0) out += fmt::format("T0 {:.6f}\n", levelT0); // start pos: level clock offset
         // the first four fields are the v2 format, so older builds still read it
         for (auto const& in : inputs)
-            out += fmt::format("{} {} {} {} {:.9f} {} {}\n", in.step, in.button, in.player1 ? 1 : 0,
-                in.down ? 1 : 0, in.frac, in.mid ? 1 : 0, in.mask);
+            out += fmt::format("{} {} {} {} {:.9f} {} {} {}\n", in.step, in.button, in.player1 ? 1 : 0,
+                in.down ? 1 : 0, in.frac, in.mid ? 1 : 0, in.mask, in.fix ? 1 : 0);
         for (auto const& sw : savedWindows)
             out += fmt::format("W {} {:.4f} {} {:.4f} {:.4f} {} {}\n", sw.idx, sw.window, sw.status,
                 sw.lo, sw.hi, sw.tap, sw.sub);
@@ -558,6 +561,8 @@ struct Macro {
                         in.frac = std::clamp(frac, 0.0, 0.999999);
                         in.mid = mid != 0;
                         in.mask = mask;
+                        int fix;
+                        if (s3 >> fix) in.fix = fix != 0;
                     }
                     if (in.mid) nMid++;
                     inputs.push_back(in);
@@ -588,6 +593,26 @@ struct RecAcc {
     std::vector<std::pair<size_t, double>> pending;   // (input index, elapsed at input)
     std::vector<float> p1dts;                          // each player-1 update delta this step
 } g_acc;
+
+// Practice checkpoints taken while recording (and the analyzer's save-states):
+// where the macro stood (its step, and how many inputs had been applied) and
+// the exact player state, written back over GD's own restore (player_snap.hpp).
+// Keyed by the checkpoint; every new CheckpointObject overwrites or erases its
+// entry, so a reused address never picks up a stale one.
+struct CpInfo {
+    int step = 0;
+    size_t inputs = 0;
+    bool dual = false;
+    fw::snap::PlayerSnap p1, p2;
+    bool hasP1 = false, hasP2 = false;
+};
+std::unordered_map<CheckpointObject*, CpInfo> g_cps;
+// checkpoints created INSIDE a step (GD places practice checkpoints from the
+// player update): snapshotted once that step is done, so the snapshot is the
+// state the next step starts from -- in a straight replay too
+std::vector<CheckpointObject*> g_pendingCps;
+int g_stepDepth = 0;                 // inside GJBaseGameLayer::processCommands
+CheckpointObject* g_respawnCp = nullptr; // set by loadFromCheckpoint, used at the end of resetLevel
 
 // Recording: which players a real input actually pushed (hooked pushButton).
 bool g_capturing = false;
@@ -782,6 +807,76 @@ void fireInput(GJBaseGameLayer* l, size_t idx) {
     fw::display::onInput(pl, ps, m.winByInput[idx]);
 }
 
+// ---- practice checkpoints ---------------------------------------------------
+
+CpInfo snapNow() {
+    auto& m = Macro::get();
+    CpInfo c;
+    c.step = m.step;
+    c.inputs = m.inputs.size();
+    if (auto pl = PlayLayer::get()) {
+        c.dual = pl->m_gameState.m_isDualMode;
+        if (pl->m_player1) { c.p1 = fw::snap::take(pl->m_player1); c.hasP1 = true; }
+        if (pl->m_player2) { c.p2 = fw::snap::take(pl->m_player2); c.hasP2 = true; }
+    }
+    return c;
+}
+
+void snapPendingCheckpoints() {
+    auto mode = Macro::get().mode;
+    if (mode == Mode::Recording || mode == Mode::Analyzing) {
+        auto c = snapNow();
+        for (auto cp : g_pendingCps) g_cps[cp] = c;
+    }
+    g_pendingCps.clear();
+}
+
+// Practice respawn while recording, part 2 (after GD's whole respawn). Put the
+// players back exactly as they were when the checkpoint was taken, then make
+// the held buttons match what the respawn left (GD lets go of everything; a
+// key you're still holding may come back) -- in the game AND in the macro, on
+// the first step after the checkpoint, so a straight replay does the same
+// thing at the same point. Before this, a checkpoint taken mid-hold left the
+// macro holding while you had let go: the replay flew a different path from
+// there.
+void practiceRespawnFix(PlayLayer* pl, CpInfo const& c) {
+    auto& m = Macro::get();
+    PlayerObject* ps[2] = { pl->m_player1, pl->m_player2 };
+    bool use[2] = { c.hasP1 && ps[0], c.hasP2 && ps[1] && c.dual && pl->m_gameState.m_isDualMode };
+    bool after[2][4] = {};
+    for (int k = 0; k < 2; k++)
+        for (int b = 1; b <= 3; b++) after[k][b] = fw::snap::held(ps[k], b);
+    // how far off GD's own restore was (diagnostic: tells whether this matters)
+    double dx = 0, dy = 0, dvy = 0;
+    if (use[0]) {
+        dx = ps[0]->m_positionX - c.p1.positionX;
+        dy = ps[0]->m_positionY - c.p1.positionY;
+        dvy = ps[0]->m_yVelocity - c.p1.m_yVelocity;
+        fw::snap::apply(ps[0], c.p1);
+    }
+    if (use[1]) fw::snap::apply(ps[1], c.p2);
+    int fixes = 0;
+    for (int k = 0; k < 2; k++) {
+        if (!use[k]) continue;
+        for (int b = 1; b <= 3; b++) {
+            if (fw::snap::held(ps[k], b) == after[k][b]) continue;
+            InputEdge e;
+            e.step = c.step + 1;
+            e.button = b;
+            e.player1 = k == 0;
+            e.down = after[k][b];
+            e.mask = 1 << k;
+            e.fix = true;
+            applyInput(pl, e);
+            m.inputs.push_back(e);
+            fixes++;
+        }
+    }
+    FW_LOG("PRACTICE respawn: macro back to step {} ({} inputs), players restored exactly{} "
+           "(GD's restore was off by dx {:+.6f} dy {:+.6f} dvy {:+.6f}), {} hold fix(es)",
+        c.step, c.inputs, use[1] ? " (both)" : "", dx, dy, dvy, fixes);
+}
+
 // Build the input schedule for a replay. When `shifted`, the analyzer's target
 // (and its paired release in tap mode) is moved by `offset` frames.
 void buildSchedule(Macro& m, bool shifted) {
@@ -829,7 +924,15 @@ void startRecording() {
     m.mode = Mode::Recording;
     m.inputs.clear();
     m.subDts.clear();
-    m.cpStep.clear();
+    // practice checkpoints from before: resetLevel would respawn there and the
+    // macro would start mid-level
+    if (pl->m_isPracticeMode && pl->m_checkpointArray && pl->m_checkpointArray->count() > 0) {
+        FW_LOG("RECORD start: clearing {} practice checkpoints so the macro starts at the start",
+            pl->m_checkpointArray->count());
+        pl->removeAllCheckpoints();
+    }
+    g_cps.clear();
+    g_pendingCps.clear();
     m.track.clear();
     m.step = 0;
     m.gameTime = 0;
@@ -854,8 +957,10 @@ void stopRecording() {
     m.saveTrack();
     int nMid = 0;
     for (auto const& in : m.inputs) if (in.mid) nMid++;
-    FW_LOG("RECORDED inputs={} midStep={} lastStep={} exactCbfSteps={}", m.inputs.size(), nMid,
-        m.inputs.back().step, m.subDts.size());
+    int nFix = 0;
+    for (auto const& in : m.inputs) if (in.fix) nFix++;
+    FW_LOG("RECORDED inputs={} midStep={} lastStep={} exactCbfSteps={} practiceHoldFixes={}", m.inputs.size(), nMid,
+        m.inputs.back().step, m.subDts.size(), nFix);
     notify(fmt::format("Macro: recorded + saved {} inputs", m.inputs.size()), NotificationIcon::Success);
 }
 
@@ -1157,6 +1262,11 @@ void beginTest() {
                 pl->m_player1->loadFromCheckpoint(a.cp->m_player1Checkpoint);
             if (pl->m_player2 && a.cp->m_player2Checkpoint)
                 pl->m_player2->loadFromCheckpoint(a.cp->m_player2Checkpoint);
+            if (auto c = g_cps.find(a.cp.data()); c != g_cps.end()) {
+                // GD's restore is lossy (float position, missing fields)
+                if (c->second.hasP1 && pl->m_player1) fw::snap::apply(pl->m_player1, c->second.p1);
+                if (c->second.hasP2 && pl->m_player2) fw::snap::apply(pl->m_player2, c->second.p2);
+            }
             m.perfLoad += msSince(tl);
             restoreHeld(pl->m_player1, a.p1);
             restoreHeld(pl->m_player2, a.p2);
@@ -1724,6 +1834,7 @@ void startAnalysis() {
     int nMid = 0;
     for (size_t i = 0; i < m.inputs.size(); i++) {
         if (m.inputs[i].mid) nMid++;
+        if (m.inputs[i].fix) continue; // a practice-respawn hold fix, not a click
         if (m.inputs[i].down || alsoReleases) m.targets.push_back(i);
     }
     if (m.targets.empty()) { notify("Analyze: no press inputs", NotificationIcon::Error); return; }
@@ -2024,7 +2135,11 @@ class $modify(MacroBGL, GJBaseGameLayer) {
                 g_attemptTime += dt; // this step's number on the level clock, like m.step
             }
         }
-        GJBaseGameLayer::processCommands(dt, isHalfTick, isLastTick);
+        {
+            struct Depth { Depth() { g_stepDepth++; } ~Depth() { g_stepDepth--; } } depth; // (GD may throw)
+            GJBaseGameLayer::processCommands(dt, isHalfTick, isLastTick);
+        }
+        if (!g_pendingCps.empty() && g_stepDepth == 0) snapPendingCheckpoints();
 
         if (pcPl && deathMode() != "Off") recordPath(pcPl);
 
@@ -2272,6 +2387,23 @@ class $modify(FwRegionPlayer, PlayerObject) {
         if (p1) g_inP1Update++;
         PlayerObject::update(dt);
         if (p1) g_inP1Update--;
+    }
+};
+
+// Every checkpoint GD creates (practice markers, and the analyzer's
+// save-states via createCheckpoint) passes through init (create() is inline on
+// Windows). Remember where the macro stood and the exact player state.
+class $modify(FwCheckpoint, CheckpointObject) {
+    bool init() {
+        if (!CheckpointObject::init()) return false;
+        auto key = static_cast<CheckpointObject*>(this);
+        g_cps.erase(key);
+        auto mode = Macro::get().mode;
+        if ((mode == Mode::Recording || mode == Mode::Analyzing) && PlayLayer::get() && !fw::ghost::isSim()) {
+            if (g_stepDepth > 0) g_pendingCps.push_back(key); // mid-step: once the step is done
+            else g_cps[key] = snapNow();
+        }
+        return true;
     }
 };
 
@@ -2528,6 +2660,9 @@ $on_mod(Loaded) {
 // ---------------------------------------------------------------------------
 class $modify(MacroPlayLayer, PlayLayer) {
     bool init(GJGameLevel* level, bool useReplay, bool dontCreateObjects) {
+        g_cps.clear();
+        g_pendingCps.clear();
+        g_respawnCp = nullptr;
         if (!PlayLayer::init(level, useReplay, dontCreateObjects)) return false;
         auto& m = Macro::get();
         // a fresh level never starts inside a macro op: a leaked Playing /
@@ -2566,6 +2701,7 @@ class $modify(MacroPlayLayer, PlayLayer) {
         }
         bool newAttemptClock = m.mode == Mode::Idle || m.mode == Mode::Recording;
         if (m.mode == Mode::Playing && m.step > 0) logPlaybackVerdict("died");
+        g_respawnCp = nullptr; // only a checkpoint loaded by THIS reset counts
         PlayLayer::resetLevel();
         int cpCount = m_checkpointArray ? m_checkpointArray->count() : 0;
         if (newAttemptClock) startAttempt(this);
@@ -2578,12 +2714,17 @@ class $modify(MacroPlayLayer, PlayLayer) {
             }
         }
         resetSplit();
+        if (m.mode == Mode::Recording && g_respawnCp) {
+            if (auto it = g_cps.find(g_respawnCp); it != g_cps.end()) practiceRespawnFix(this, it->second);
+        }
+        g_respawnCp = nullptr;
         if (m.mode == Mode::Recording) {
             g_acc = RecAcc{};
             if (cpCount == 0) {
                 m.inputs.clear();
                 m.subDts.clear();
-                m.cpStep.clear();
+                g_cps.clear();
+                g_pendingCps.clear();
                 m.track.clear();
                 m.step = 0;
                 m.gameTime = 0;
@@ -2630,27 +2771,28 @@ class $modify(MacroPlayLayer, PlayLayer) {
         }
     }
 
-    CheckpointObject* markCheckpoint() {
-        auto cp = PlayLayer::markCheckpoint();
-        auto& m = Macro::get();
-        if (m.mode == Mode::Recording && cp) m.cpStep[cp] = m.step;
-        return cp;
-    }
-
+    // Practice respawn while recording, part 1: rewind the macro to exactly
+    // what the checkpoint contains -- the inputs applied before it was taken
+    // (by count: a click on the checkpoint's own step IS in it, and used to be
+    // dropped) and its step. Part 2 is at the end of resetLevel.
     void loadFromCheckpoint(CheckpointObject* cp) {
         PlayLayer::loadFromCheckpoint(cp);
         auto& m = Macro::get();
         if (m.mode == Mode::Recording && cp) {
             g_acc = RecAcc{};
-            auto it = m.cpStep.find(cp);
-            if (it != m.cpStep.end()) {
-                m.step = it->second;
-                m.gameTime = m.step / 240.0;
-                while (!m.inputs.empty() && m.inputs.back().step >= m.step) m.inputs.pop_back();
-                for (auto it = m.subDts.begin(); it != m.subDts.end();)
-                    it = it->first >= m.step ? m.subDts.erase(it) : std::next(it);
-                if (static_cast<int>(m.track.size()) > m.step) m.track.resize(m.step);
+            auto it = g_cps.find(cp);
+            if (it == g_cps.end()) {
+                FW_WARN("PRACTICE respawn at a checkpoint the recorder never saw: the macro can't be rewound");
+                return;
             }
+            auto const& c = it->second;
+            m.step = c.step;
+            m.gameTime = m.step / 240.0;
+            if (m.inputs.size() > c.inputs) m.inputs.resize(c.inputs);
+            for (auto st = m.subDts.begin(); st != m.subDts.end();)
+                st = st->first > m.step ? m.subDts.erase(st) : std::next(st);
+            if (static_cast<int>(m.track.size()) > m.step + 1) m.track.resize(m.step + 1);
+            g_respawnCp = cp;
         }
     }
 
