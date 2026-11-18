@@ -2124,6 +2124,8 @@ struct EdRt {
     std::vector<InputEdge> origInputs;
     std::unordered_map<int, std::vector<float>> origSubDts;
     std::string title;
+    int stillWatch = 0; // steps after a save-state restore to check for GD's still step
+    int stillFound = 0;
 };
 EdRt g_ed;
 bool g_edInTick = false; // the editor is running GD's update itself
@@ -2215,6 +2217,10 @@ void edRestore(PlayLayer* pl, int s) {
         m.gameTime = st->step / 240.0;
         pl->m_randomSeed = st->seed1;
         pl->m_replayRandSeed = st->seed2;
+        // GD holds the player still for a step after a checkpoint load (as
+        // after a practice respawn): that step mustn't count (processCommands)
+        g_ed.stillWatch = 3;
+        g_ed.stillFound = 0;
     }
     edSeekSchedule(m, m.step);
     resetSplit();
@@ -2392,7 +2398,7 @@ void tick(float dt) {
     g_edDiag.t += dt;
     if (g_edDiag.t >= 1.f) {
         bool waiting = g_ed.building || g_ed.busy == Busy::Seeking || g_ed.busy == Busy::Resim;
-        if (waiting)
+        if (waiting && g_edDiag.stepped < 3)
             FW_LOG("EDITOR tick: busy={} step={} target={} wait={} dead={} paused={} started={} resume={} "
                    "gdCalls={} framesStepped={}",
                 static_cast<int>(g_ed.busy), m.step, g_ed.target, g_ed.waitFrame ? 1 : 0, g_ed.dead ? 1 : 0,
@@ -2668,6 +2674,9 @@ class $modify(MacroBGL, GJBaseGameLayer) {
             }
         }
         bool rec = m.mode == Mode::Recording && pcPl && m_player1;
+        bool edWatch = m.mode == Mode::Editing && g_ed.stillWatch > 0 && m_player1 && !m_player1->m_isPlatformer
+            && static_cast<GJBaseGameLayer*>(PlayLayer::get()) == this && !fw::ghost::isSim();
+        double ex = edWatch ? m_player1->m_positionX : 0.0, ey = edWatch ? m_player1->m_positionY : 0.0;
         bool watchStill = rec && g_stillWatch > 0 && !m_player1->m_isPlatformer;
         double sx = watchStill ? m_player1->m_positionX : 0.0, sy = watchStill ? m_player1->m_positionY : 0.0;
         {
@@ -2675,6 +2684,19 @@ class $modify(MacroBGL, GJBaseGameLayer) {
             GJBaseGameLayer::processCommands(dt, isHalfTick, isLastTick);
         }
         if (!g_pendingCps.empty() && g_stepDepth == 0) snapPendingCheckpoints();
+        if (edWatch) {
+            g_ed.stillWatch--;
+            if (!m_player1->m_isDead && m_player1->m_positionX == ex && m_player1->m_positionY == ey
+                && g_ed.stillFound < 8) {
+                m.gameTime -= dt; // held still: not a step of the run
+                m.step = static_cast<int>(std::llround(m.gameTime * 240.0));
+                g_ed.stillFound++;
+                g_ed.stillWatch++;
+            } else if (g_ed.stillFound > 0) {
+                log::debug("[fw] EDITOR restore: {} still step(s) not counted", g_ed.stillFound);
+                g_ed.stillWatch = 0;
+            }
+        }
         if (watchStill) {
             g_stillWatch--;
             if (!m_player1->m_isDead && m_player1->m_positionX == sx && m_player1->m_positionY == sy

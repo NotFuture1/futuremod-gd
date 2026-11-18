@@ -153,6 +153,8 @@ private:
     uint64_t m_lastRev = 0;
     bool m_dirtyDraw = true;
     std::string m_lastStatus, m_lastInfo;
+    float m_commitIn = -1.f;    // a nudge waits for the key to settle before re-simulating
+    double m_commitAt = -1.0;
     std::string m_message; // a one-off note (e.g. "can't add a click here")
     float m_messageTime = 0.f;
 
@@ -626,6 +628,7 @@ private:
     void update(float dt) override {
         if (!rt::active()) { if (!m_closing) { m_closing = true; this->removeFromParent(); } return; }
         showCursor();
+        if (m_commitIn >= 0.f && (m_commitIn -= dt) < 0.f) commit(m_commitAt);
         rt::tick(dt);
         if (rt::playing()) showFrame(rt::playhead());
         uint64_t rev = rt::revision();
@@ -670,7 +673,10 @@ private:
         double t = m_model.edges()[i].t;
         double step = coarse ? (m_cbf ? 1.0 : 10.0) : snapStep(fine);
         m_model.move(m_sel, t + dir * step, fine ? snapStep(true) : snapStep(false));
-        commit(m_model.edges()[m_model.indexOf(m_sel)].t);
+        // re-simulate once the key is let go / settles, not on every repeat
+        m_commitIn = 0.3f;
+        m_commitAt = m_model.edges()[m_model.indexOf(m_sel)].t;
+        m_dirtyDraw = true;
     }
 
     void selectNext(int dir) {
