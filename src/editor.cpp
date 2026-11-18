@@ -613,8 +613,20 @@ private:
         m_messageTime = 3.f;
     }
 
+    static void showCursor() {
+#ifdef GEODE_IS_WINDOWS
+        // GD hides (and may lock) the cursor while a level is playing
+        if (auto view = CCDirector::sharedDirector()->getOpenGLView()) {
+            view->showCursor(true);
+            view->toggleLockCursor(false);
+        }
+#endif
+    }
+
     void update(float dt) override {
         if (!rt::active()) { if (!m_closing) { m_closing = true; this->removeFromParent(); } return; }
+        showCursor();
+        rt::tick(dt);
         if (rt::playing()) showFrame(rt::playhead());
         uint64_t rev = rt::revision();
         if (rev != m_lastRev || m_dirtyDraw) {

@@ -2126,6 +2126,8 @@ struct EdRt {
     std::string title;
 };
 EdRt g_ed;
+bool g_edInTick = false; // the editor is running GD's update itself
+struct EdDiag { float t = 0.f; int calls = 0, stepped = 0; } g_edDiag;
 
 uint8_t edModeOf(PlayerObject* p) {
     if (p->m_isShip) return fw::edrt::kShip;
@@ -2367,6 +2369,37 @@ void edFrame(GJBaseGameLayer* layer, float dt, void (*runGD)(GJBaseGameLayer*, f
 } // namespace
 
 namespace fw::edrt {
+
+void tick(float dt) {
+    auto pl = PlayLayer::get();
+    if (!g_ed.active || !pl || g_levelCorrupt) return;
+    auto& m = Macro::get();
+    int before = m.step;
+    edFrame(pl, dt, [](GJBaseGameLayer* l, float d) {
+        auto p = static_cast<PlayLayer*>(l);
+        p->m_resumeTimer = 0; // no "just unpaused" dead frames
+        if (!p->m_started) {
+            FW_LOG("EDITOR level wasn't started: starting it");
+            p->startGame();
+        }
+        g_edInTick = true;
+        try { l->update(d); } catch (...) { g_edInTick = false; throw; }
+        g_edInTick = false;
+        g_edDiag.calls++;
+    });
+    if (m.step != before) g_edDiag.stepped++;
+    // once a second while it's waiting on something: what's going on
+    g_edDiag.t += dt;
+    if (g_edDiag.t >= 1.f) {
+        bool waiting = g_ed.building || g_ed.busy == Busy::Seeking || g_ed.busy == Busy::Resim;
+        if (waiting)
+            FW_LOG("EDITOR tick: busy={} step={} target={} wait={} dead={} paused={} started={} resume={} "
+                   "gdCalls={} framesStepped={}",
+                static_cast<int>(g_ed.busy), m.step, g_ed.target, g_ed.waitFrame ? 1 : 0, g_ed.dead ? 1 : 0,
+                pl->m_isPaused ? 1 : 0, pl->m_started ? 1 : 0, pl->m_resumeTimer, g_edDiag.calls, g_edDiag.stepped);
+        g_edDiag = EdDiag{};
+    }
+}
 
 bool active() { return g_ed.active; }
 
@@ -2834,8 +2867,10 @@ class $modify(MacroBGL, GJBaseGameLayer) {
 
         if (g_levelCorrupt) return; // frozen after a GD error (see abortAnalysis)
         if (m.mode == Mode::Editing) {
-            // frozen unless the macro editor is simulating (edFrame runs GD)
-            edFrame(this, dt, [](GJBaseGameLayer* l, float d) { static_cast<MacroBGL*>(l)->GJBaseGameLayer::update(d); });
+            // frozen; the editor runs GD itself (fw::edrt::tick, from its own
+            // layer's update -- GD's own update may not even be scheduled
+            // after the pause menu)
+            if (g_edInTick) GJBaseGameLayer::update(dt);
             return;
         }
         if (m.mode == Mode::Analyzing) {

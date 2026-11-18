@@ -61,6 +61,8 @@ int endLimit();  // furthest step the editor simulates to
 std::string title();
 
 // ---- simulation ---------------------------------------------------------------
+// call every frame (the editor's own layer does): runs the simulation
+void tick(float dt);
 Busy busy();
 float progress(); // building: 0..1
 // show the level at this step
