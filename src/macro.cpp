@@ -613,6 +613,18 @@ std::unordered_map<CheckpointObject*, CpInfo> g_cps;
 std::vector<CheckpointObject*> g_pendingCps;
 int g_stepDepth = 0;                 // inside GJBaseGameLayer::processCommands
 CheckpointObject* g_respawnCp = nullptr; // set by loadFromCheckpoint, used at the end of resetLevel
+// After a practice respawn GD can hold the player still for a step: the step
+// runs, the player doesn't move. A straight replay has no such step, so
+// counting it put every later input of that attempt one step late -- one more
+// per respawn (user log 2026-11-17: replay exactly one 2x-speed step ahead of
+// the recording right after the first checkpoint). The first few steps after
+// a respawn are watched; a still one isn't counted.
+int g_stillWatch = 0;   // steps left to watch
+int g_stillFound = 0;   // still steps found after the current respawn
+int g_stillTotal = 0;   // ...in this recording
+// physics step lengths while recording (a speedhack changes them, and a run
+// stepped differently can't be replayed exactly at 240 steps a second)
+struct DtStats { int steps = 0, odd = 0; double lo = 1e9, hi = 0.0; } g_dt;
 
 // Recording: which players a real input actually pushed (hooked pushButton).
 bool g_capturing = false;
@@ -841,6 +853,9 @@ void snapPendingCheckpoints() {
 // there.
 void practiceRespawnFix(PlayLayer* pl, CpInfo const& c) {
     auto& m = Macro::get();
+    // (again: a step GD ran inside its respawn isn't a step of the run either)
+    m.step = c.step;
+    m.gameTime = c.step / 240.0;
     PlayerObject* ps[2] = { pl->m_player1, pl->m_player2 };
     bool use[2] = { c.hasP1 && ps[0], c.hasP2 && ps[1] && c.dual && pl->m_gameState.m_isDualMode };
     bool after[2][4] = {};
@@ -872,6 +887,8 @@ void practiceRespawnFix(PlayLayer* pl, CpInfo const& c) {
             fixes++;
         }
     }
+    g_stillWatch = 3;
+    g_stillFound = 0;
     FW_LOG("PRACTICE respawn: macro back to step {} ({} inputs), players restored exactly{} "
            "(GD's restore was off by dx {:+.6f} dy {:+.6f} dvy {:+.6f}), {} hold fix(es)",
         c.step, c.inputs, use[1] ? " (both)" : "", dx, dy, dvy, fixes);
@@ -933,6 +950,8 @@ void startRecording() {
     }
     g_cps.clear();
     g_pendingCps.clear();
+    g_stillWatch = g_stillFound = g_stillTotal = 0;
+    g_dt = DtStats{};
     m.track.clear();
     m.step = 0;
     m.gameTime = 0;
@@ -959,8 +978,13 @@ void stopRecording() {
     for (auto const& in : m.inputs) if (in.mid) nMid++;
     int nFix = 0;
     for (auto const& in : m.inputs) if (in.fix) nFix++;
-    FW_LOG("RECORDED inputs={} midStep={} lastStep={} exactCbfSteps={} practiceHoldFixes={}", m.inputs.size(), nMid,
-        m.inputs.back().step, m.subDts.size(), nFix);
+    FW_LOG("RECORDED inputs={} midStep={} lastStep={} exactCbfSteps={} practiceHoldFixes={} stillStepsSkipped={} "
+           "stepDt {:.6f}..{:.6f} ({} of {} steps not 1/240)",
+        m.inputs.size(), nMid, m.inputs.back().step, m.subDts.size(), nFix, g_stillTotal,
+        g_dt.lo, g_dt.hi, g_dt.odd, g_dt.steps);
+    if (g_dt.steps > 0 && g_dt.odd * 20 > g_dt.steps)
+        notify("Recorded with a speedhack on: physics steps weren't 1/240 s,\n"
+               "so the replay can't match exactly. Record at normal speed.", NotificationIcon::Warning);
     notify(fmt::format("Macro: recorded + saved {} inputs", m.inputs.size()), NotificationIcon::Success);
 }
 
@@ -2135,11 +2159,40 @@ class $modify(MacroBGL, GJBaseGameLayer) {
                 g_attemptTime += dt; // this step's number on the level clock, like m.step
             }
         }
+        bool rec = m.mode == Mode::Recording && pcPl && m_player1;
+        bool watchStill = rec && g_stillWatch > 0 && !m_player1->m_isPlatformer;
+        double sx = watchStill ? m_player1->m_positionX : 0.0, sy = watchStill ? m_player1->m_positionY : 0.0;
         {
             struct Depth { Depth() { g_stepDepth++; } ~Depth() { g_stepDepth--; } } depth; // (GD may throw)
             GJBaseGameLayer::processCommands(dt, isHalfTick, isLastTick);
         }
         if (!g_pendingCps.empty() && g_stepDepth == 0) snapPendingCheckpoints();
+        if (watchStill) {
+            g_stillWatch--;
+            if (!m_player1->m_isDead && m_player1->m_positionX == sx && m_player1->m_positionY == sy
+                && g_stillFound < 8) {
+                // held still: not a step of the run (inputs this step land on the next one)
+                m.gameTime -= dt;
+                m.step = static_cast<int>(std::llround(m.gameTime * 240.0));
+                g_attemptTime -= dt;
+                g_stillFound++;
+                g_stillTotal++;
+                g_stillWatch++; // keep watching for the first real step
+            } else if (g_stillWatch == 0 || g_stillFound > 0) {
+                if (g_stillFound > 0)
+                    FW_LOG("PRACTICE respawn: GD held the player still for {} step(s) after it; not counted",
+                        g_stillFound);
+                g_stillWatch = 0;
+            }
+        }
+        if (rec) {
+            // a step is 1/240 s, scaled by the level's time warp
+            float tw = m_gameState.m_timeWarp > 0.f ? m_gameState.m_timeWarp : 1.f;
+            g_dt.steps++;
+            g_dt.lo = std::min(g_dt.lo, static_cast<double>(dt));
+            g_dt.hi = std::max(g_dt.hi, static_cast<double>(dt));
+            if (std::fabs(dt * 240.0 - 1.0) > 1e-3 && std::fabs(dt * 240.0 - tw) > 1e-3) g_dt.odd++;
+        }
 
         if (pcPl && deathMode() != "Off") recordPath(pcPl);
 

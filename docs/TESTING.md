@@ -244,7 +244,11 @@ The window extender's decision logic is also tested without GD:
    `hold fix(es)` is 1 when you died holding.
    ❌ `PRACTICE respawn at a checkpoint the recorder never saw` means the
    respawn couldn't be rewound. Send the log.
-4. Finish, press **J**, then **K** (Step 2's check). Pass:
+   v1.19.1: `GD held the player still for N step(s) after it; not counted`
+   after a respawn is the fix for the one-step-per-respawn offset working.
+   Record at **normal speed** (speedhack off). The `RECORDED` line shows
+   `stepDt ... (N of M steps not 1/240)`, which should be 0.
+4. Finish, press **J**, then **K** (Step 2's check), with noclip **off**. Pass:
    `VERDICT=EXACT`, with no `PLAYBACK first off at step` line near a
    checkpoint's step.
 
