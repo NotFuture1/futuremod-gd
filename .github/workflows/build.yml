@@ -8,7 +8,7 @@ on:
   workflow_dispatch:
 
 jobs:
-  # Logic that doesn't need GD (window extender) is tested on its own.
+  # Logic that doesn't need GD (window extender, macro editor model) is tested on its own.
   tests:
     name: Host tests
     runs-on: ubuntu-latest
@@ -19,6 +19,10 @@ jobs:
         run: |
           g++ -std=c++20 -Wall -Wextra -I src tests/assist_test.cpp -o assist_test
           ./assist_test
+      - name: Macro editor model
+        run: |
+          g++ -std=c++20 -Wall -Wextra -I src tests/editor_test.cpp -o editor_test
+          ./editor_test
 
   build:
     name: Build Windows

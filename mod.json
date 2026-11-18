@@ -5,7 +5,7 @@
         "mac": "2.2081",
         "android": "2.2081"
     },
-    "version": "v1.20.1",
+    "version": "v1.21.0",
     "id": "future.futuremod",
     "name": "Future Mod",
     "developer": "future",
@@ -157,6 +157,129 @@
             "description": "The level's name on nandl.pages.dev, if it differs from its name in GD. Leave blank to use the GD name. Used by the NaNDL comparison after an analysis and by the pause menu NaNDL button.",
             "type": "string",
             "default": ""
+        },
+        "editor-title": {
+            "name": "Macro editor (pause menu > Edit macro)",
+            "description": "A timeline of your macro over the level itself: move clicks by tiny amounts, add or delete clicks, and see straight away whether the changed macro still makes it. Uses the macro replay, so it counts as a cheat while open.",
+            "type": "title"
+        },
+        "editor-snap-cbf": {
+            "name": "CBF snap step",
+            "description": "How finely clicks of a CBF macro move (in frames, 240 a second). Hold Shift while dragging (or nudging with the arrow keys) for 8x finer. Clicks of a normal (non-CBF) macro always move by whole frames: the game can only apply them on a frame.",
+            "type": "string",
+            "default": "1/8",
+            "one-of": [
+                "1/2",
+                "1/4",
+                "1/8",
+                "1/16",
+                "1/32",
+                "1/64"
+            ]
+        },
+        "editor-resim-seconds": {
+            "name": "Re-simulate after an edit (seconds)",
+            "description": "After you move, add or delete a click, this much of the level from the change on is played again with the edited macro, so you see the new path and whether it dies. Seeking further plays more as needed.",
+            "type": "float",
+            "default": 3.0,
+            "min": 0.5,
+            "max": 30.0
+        },
+        "editor-resim-to-end": {
+            "name": "Re-simulate to the end",
+            "description": "Play the edited macro all the way to the end after every edit (slower on long levels, but you always see whether the whole run still works).",
+            "type": "bool",
+            "default": false
+        },
+        "editor-savestate-steps": {
+            "name": "Save-state every N steps",
+            "description": "How often the editor keeps a save-state of the run (240 steps = 1 second). Lower = faster seeking and re-simulating, more memory.",
+            "type": "int",
+            "default": 120,
+            "min": 30,
+            "max": 960
+        },
+        "editor-play-speed": {
+            "name": "Play speed",
+            "description": "Speed of the Play button (Space) in the editor. 1 = normal.",
+            "type": "float",
+            "default": 1.0,
+            "min": 0.1,
+            "max": 2.0
+        },
+        "editor-default-hold": {
+            "name": "Added click length (frames)",
+            "description": "How long a click added with Add (A) is held, in frames.",
+            "type": "float",
+            "default": 4.0,
+            "min": 1.0,
+            "max": 120.0
+        },
+        "editor-preview-lead": {
+            "name": "Show the level before a click (frames)",
+            "description": "When you select or move a click, the level is shown this many frames before it, so you see the approach.",
+            "type": "int",
+            "default": 30,
+            "min": 0,
+            "max": 480
+        },
+        "editor-show-on-level": {
+            "name": "Draw on the level",
+            "description": "Draw the path, clicks and frame windows on the level itself (not only on the timeline).",
+            "type": "bool",
+            "default": true
+        },
+        "editor-show-path": {
+            "name": "Show the path",
+            "description": "The edited macro's path where it has been simulated (cyan; pink for player 2).",
+            "type": "bool",
+            "default": true
+        },
+        "editor-show-original": {
+            "name": "Show the original path",
+            "description": "The path of the macro as it was when you opened the editor, faint, to compare with the edited one.",
+            "type": "bool",
+            "default": true
+        },
+        "editor-show-windows": {
+            "name": "Show frame windows",
+            "description": "Each analyzed click's frame window, behind it on the timeline and along the path (red 1f or less, orange 2, yellow 4, green wider). Faded for a moved click: it was measured at the old time.",
+            "type": "bool",
+            "default": true
+        },
+        "editor-show-holds": {
+            "name": "Show hold bars",
+            "description": "Press-to-release bars on the timeline.",
+            "type": "bool",
+            "default": true
+        },
+        "editor-show-modes": {
+            "name": "Show gamemode strip",
+            "description": "A coloured strip of the gamemodes (darker = mini) and speed changes along the timeline.",
+            "type": "bool",
+            "default": true
+        },
+        "editor-timeline-height": {
+            "name": "Timeline size",
+            "description": "Height of the timeline at the bottom. 1 = normal.",
+            "type": "float",
+            "default": 1.0,
+            "min": 0.6,
+            "max": 1.8
+        },
+        "editor-undo-limit": {
+            "name": "Undo steps",
+            "description": "How many edits can be undone.",
+            "type": "int",
+            "default": 200,
+            "min": 10,
+            "max": 2000
+        },
+        "editor-confirm-exit": {
+            "name": "Ask before discarding",
+            "description": "Ask whether to save when you leave the editor with unsaved changes.",
+            "type": "bool",
+            "default": true
         },
         "cheat-title": {
             "name": "Cheat modules (CHEATING shows only while one is in use)",

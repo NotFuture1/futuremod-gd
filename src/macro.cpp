@@ -5,6 +5,7 @@
 #include "timings.hpp"
 #include "core.hpp"
 #include "player_snap.hpp"
+#include "editor.hpp"
 
 #include <Geode/Geode.hpp>
 #include <Geode/modify/GJBaseGameLayer.hpp>
@@ -72,7 +73,7 @@ constexpr double kSmallest = std::numeric_limits<float>::min(); // CBF's minimum
 // playback window sounds in display.cpp).
 constexpr float kDing240 = 0.85f;
 
-enum class Mode { Idle, Recording, Playing, Analyzing };
+enum class Mode { Idle, Recording, Playing, Analyzing, Editing };
 enum class Phase { Integer, Refine };
 
 // Per-input confidence. A number we aren't sure of must never silently enter a
@@ -675,7 +676,7 @@ void finalizePending(Macro& m) {
 
 bool driving() {
     auto mode = Macro::get().mode;
-    return mode == Mode::Playing || mode == Mode::Analyzing;
+    return mode == Mode::Playing || mode == Mode::Analyzing || mode == Mode::Editing;
 }
 
 void notify(std::string const& msg, NotificationIcon icon) {
@@ -1849,7 +1850,7 @@ void startAnalysis() {
         return;
     }
     fw::display::stop(pl); // rings belong to playback
-    if (auto fae = FMODAudioEngine::sharedEngine()) fae->stopAllMusic(true); // analysis is silent
+    if (auto fae = FMODAudioEngine::sharedEngine()) fae->stopAllMusic(false); // analysis is silent
     bool alsoReleases = Mod::get()->getSettingValue<bool>("analyze-releases");
     m.maxWindow = std::clamp(settingInt("fw-max-window"), 2, 30);
     m.subSteps = std::clamp(settingInt("fw-subframe"), 0, 6);
@@ -2062,7 +2063,7 @@ namespace fw::core {
 
 bool idle() { return Macro::get().mode == Mode::Idle; }
 
-bool replaying() { return Macro::get().mode == Mode::Playing; }
+bool replaying() { return Macro::get().mode == Mode::Playing || Macro::get().mode == Mode::Editing; }
 
 bool recording() { return Macro::get().mode == Mode::Recording; }
 
@@ -2075,6 +2076,481 @@ double lastDiedOn() { return g_lastDiedOn; }
 std::string baseKey() { return baseKeyOf(Macro::get().curKey); }
 
 } // namespace fw::core
+
+// ===========================================================================
+// Macro editor runtime (UI: editor.cpp, interface: editor.hpp).
+//
+// Mode::Editing. The level is frozen (GD's update isn't called) except while
+// the editor simulates: the macro is replayed exactly like a K playback
+// (same input injection, same CBF split), but in whole-step chunks as fast as
+// the frame allows, from a save-state. Save-states (createCheckpoint + our
+// exact player snapshot, as the analyzer's) are taken every N steps of any
+// run of the current macro; an edit drops the ones after it.
+// ===========================================================================
+namespace {
+
+struct EdState {
+    Ref<CheckpointObject> cp;
+    int step = 0;
+    Macro::Held p1, p2;
+    uint64_t seed1 = 0, seed2 = 0;
+};
+
+struct EdRt {
+    bool active = false;
+    fw::edrt::Busy busy = fw::edrt::Busy::None;
+    bool building = false;
+    int target = 0;        // simulate until m.step reaches this
+    bool waitFrame = false; // a restore happened: simulate from the next frame on
+    bool live = false;     // the level holds the CURRENT macro's state at m.step
+    bool contiguous = false; // this run extends the known path
+    bool dead = false;     // the level is dead (or ended) right now
+    int wantSeek = -1;     // requested playhead
+    bool wantResim = false;
+    int resimFrom = 0;
+    int park = -1;         // after a re-sim, back to this step
+    bool playing = false;
+    double playCarry = 0.0;
+    int playhead = 0;
+    int endLimit = 0;
+    int lastStep = 0;
+    int interval = 120;
+    std::map<int, EdState> states;
+    std::vector<fw::edrt::PathPt> path[2], base[2];
+    std::vector<std::pair<float, float>> raw; // player 1's getPosition() per step (the macro's track format)
+    std::vector<fw::edrt::StepInfo> info;
+    int knownTo = -1, deathStep = -1, endStep = -1;
+    uint64_t rev = 1;
+    std::vector<InputEdge> origInputs;
+    std::unordered_map<int, std::vector<float>> origSubDts;
+    std::string title;
+};
+EdRt g_ed;
+
+uint8_t edModeOf(PlayerObject* p) {
+    if (p->m_isShip) return fw::edrt::kShip;
+    if (p->m_isBall) return fw::edrt::kBall;
+    if (p->m_isBird) return fw::edrt::kUfo;
+    if (p->m_isDart) return fw::edrt::kWave;
+    if (p->m_isRobot) return fw::edrt::kRobot;
+    if (p->m_isSpider) return fw::edrt::kSpider;
+    if (p->m_isSwing) return fw::edrt::kSwing;
+    return fw::edrt::kCube;
+}
+
+std::vector<fw::ed::Edge> edgesOf(std::vector<InputEdge> const& in) {
+    std::vector<fw::ed::Edge> out;
+    out.reserve(in.size());
+    for (auto const& i : in) {
+        fw::ed::Edge e;
+        e.t = i.step + (i.mid ? i.frac : 0.0);
+        e.down = i.down;
+        e.button = i.button;
+        e.p1 = i.player1;
+        e.mask = i.mask;
+        e.mid = i.mid;
+        e.fix = i.fix;
+        out.push_back(e);
+    }
+    return out;
+}
+
+std::vector<InputEdge> inputsOf(std::vector<fw::ed::Edge> const& edges) {
+    std::vector<InputEdge> out;
+    out.reserve(edges.size());
+    for (auto const& e : edges) {
+        InputEdge i;
+        i.step = static_cast<int>(std::floor(e.t + 1e-9));
+        double frac = e.t - i.step;
+        if (frac < 1e-9) frac = 0.0;
+        i.frac = std::clamp(frac, 0.0, 0.999999);
+        i.mid = e.mid || frac > 0.0;
+        i.button = e.button;
+        i.player1 = e.p1;
+        i.down = e.down;
+        i.mask = e.mask;
+        i.fix = e.fix;
+        out.push_back(i);
+    }
+    return out;
+}
+
+// the inputs of each step, to tell which steps' exact CBF deltas still apply
+std::map<int, std::vector<std::tuple<double, bool, int, int>>> inputsByStep(std::vector<InputEdge> const& in) {
+    std::map<int, std::vector<std::tuple<double, bool, int, int>>> m;
+    for (auto const& i : in) m[i.step].push_back({ i.mid ? i.frac : -1.0, i.down, i.button, i.mask });
+    return m;
+}
+
+void edBump() { g_ed.rev++; }
+
+// first scheduled input still to come after the state at `step` (all of
+// `step`'s own inputs are in that state)
+void edSeekSchedule(Macro& m, int step) {
+    m.schedPos = 0;
+    while (m.schedPos < m.sched.size() && m.sched[m.schedPos].step <= step) m.schedPos++;
+}
+
+// Put the level at a save-state at or before `s` (or the start). The game
+// simulates from the next frame on (GD wants a frame after a reset).
+void edRestore(PlayLayer* pl, int s) {
+    auto& m = Macro::get();
+    EdState const* st = nullptr;
+    for (auto it = g_ed.states.begin(); it != g_ed.states.end() && it->first <= s; ++it) st = &it->second;
+    pl->stopAllActions(); // cancels a respawn GD may still have queued from a death
+    pl->resetLevel();     // Editing branch: step 0, schedule from the start, seeds
+    if (st && st->cp) {
+        pl->loadFromCheckpoint(st->cp);
+        if (pl->m_player1 && st->cp->m_player1Checkpoint) pl->m_player1->loadFromCheckpoint(st->cp->m_player1Checkpoint);
+        if (pl->m_player2 && st->cp->m_player2Checkpoint) pl->m_player2->loadFromCheckpoint(st->cp->m_player2Checkpoint);
+        if (auto c = g_cps.find(st->cp.data()); c != g_cps.end()) {
+            if (c->second.hasP1 && pl->m_player1) fw::snap::apply(pl->m_player1, c->second.p1);
+            if (c->second.hasP2 && pl->m_player2) fw::snap::apply(pl->m_player2, c->second.p2);
+        }
+        restoreHeld(pl->m_player1, st->p1);
+        restoreHeld(pl->m_player2, st->p2);
+        m.step = st->step;
+        m.gameTime = st->step / 240.0;
+        pl->m_randomSeed = st->seed1;
+        pl->m_replayRandSeed = st->seed2;
+    }
+    edSeekSchedule(m, m.step);
+    resetSplit();
+    g_acc = RecAcc{};
+    g_ed.live = true;
+    g_ed.dead = false;
+    g_ed.contiguous = m.step <= g_ed.knownTo + 1;
+    g_ed.waitFrame = true;
+}
+
+int edClampSeek(int s) {
+    s = std::clamp(s, 0, g_ed.endLimit);
+    if (g_ed.deathStep >= 0) s = std::min(s, g_ed.deathStep);
+    if (g_ed.endStep >= 0) s = std::min(s, g_ed.endStep);
+    return s;
+}
+
+// one step just ran (processCommands): record it
+void edAfterStep(PlayLayer* pl) {
+    auto& m = Macro::get();
+    int s = m.step;
+    if (s < 0 || s > g_ed.endLimit + 240) return;
+    size_t need = static_cast<size_t>(s) + 1;
+    if (g_ed.info.size() < need) {
+        g_ed.info.resize(need);
+        g_ed.raw.resize(need, { kNoPos, kNoPos });
+        for (int k = 0; k < 2; k++) g_ed.path[k].resize(need);
+    }
+    PlayerObject* ps[2] = { pl->m_player1, pl->m_player2 };
+    bool dual = pl->m_gameState.m_isDualMode;
+    for (int k = 0; k < 2; k++) {
+        auto p = ps[k];
+        auto& slot = g_ed.path[k][s];
+        if (!p || !p->getParent() || (k == 1 && !dual)) { slot = {}; continue; }
+        auto w = pl->m_objectLayer->convertToNodeSpace(p->getParent()->convertToWorldSpace(p->getPosition()));
+        slot = { w.x, w.y, true };
+    }
+    if (pl->m_player1) {
+        auto pos = pl->m_player1->getPosition();
+        g_ed.raw[s] = { pos.x, pos.y };
+        auto& in = g_ed.info[s];
+        in.mode = edModeOf(pl->m_player1);
+        in.mini = pl->m_player1->m_vehicleSize < 1.f;
+        in.upsideDown = pl->m_player1->m_isUpsideDown;
+        in.speed = pl->m_player1->m_playerSpeed;
+        in.ok = true;
+    }
+    if (g_ed.contiguous && s > g_ed.knownTo) g_ed.knownTo = s;
+    // a save-state every `interval` steps of the current macro
+    if (s > 0 && s % g_ed.interval == 0 && !g_ed.states.count(s)) {
+        if (auto cp = pl->createCheckpoint()) {
+            EdState st;
+            st.cp = cp;
+            st.step = s;
+            st.p1 = captureHeld(pl->m_player1);
+            st.p2 = captureHeld(pl->m_player2);
+            st.seed1 = pl->m_randomSeed;
+            st.seed2 = pl->m_replayRandSeed;
+            g_ed.states[s] = st;
+        }
+    }
+}
+
+void edStop() {
+    g_ed.target = Macro::get().step;
+    g_ed.playing = false;
+}
+
+// once per rendered frame while editing (instead of GD's own update)
+void edFrame(GJBaseGameLayer* layer, float dt, void (*runGD)(GJBaseGameLayer*, float)) {
+    auto& m = Macro::get();
+    auto pl = PlayLayer::get();
+    if (!pl || static_cast<GJBaseGameLayer*>(pl) != layer) return;
+    if (g_ed.waitFrame) { g_ed.waitFrame = false; return; }
+
+    using fw::edrt::Busy;
+    if (!g_ed.building && g_ed.wantResim) {
+        g_ed.wantResim = false;
+        int from = std::max(0, g_ed.resimFrom - 1);
+        int len = Mod::get()->getSettingValue<bool>("editor-resim-to-end")
+            ? g_ed.endLimit
+            : static_cast<int>(std::lround(Mod::get()->getSettingValue<double>("editor-resim-seconds") * 240.0));
+        g_ed.park = g_ed.wantSeek >= 0 ? g_ed.wantSeek : g_ed.playhead;
+        g_ed.wantSeek = -1;
+        g_ed.target = std::min(g_ed.endLimit, g_ed.resimFrom + len);
+        g_ed.busy = Busy::Resim;
+        g_ed.playing = false;
+        if (!(g_ed.live && !g_ed.dead && m.step <= from)) { edRestore(pl, from); return; }
+    } else if (!g_ed.building && g_ed.wantSeek >= 0 && g_ed.busy != Busy::Resim) {
+        int s = edClampSeek(g_ed.wantSeek);
+        g_ed.wantSeek = -1;
+        g_ed.playhead = s;
+        g_ed.target = s;
+        g_ed.busy = Busy::Seeking;
+        bool forward = g_ed.live && !g_ed.dead && m.step <= s && s - m.step <= 2 * g_ed.interval;
+        if (!forward && !(g_ed.live && !g_ed.dead && m.step == s)) { edRestore(pl, s); edBump(); return; }
+    }
+
+    if (g_ed.playing) {
+        double speed = Mod::get()->getSettingValue<double>("editor-play-speed");
+        double steps = g_ed.playCarry + dt * 240.0 * speed;
+        int whole = static_cast<int>(std::floor(steps));
+        g_ed.playCarry = steps - whole;
+        g_ed.target = std::min(g_ed.endLimit, m.step + whole);
+        if (g_ed.dead || m.step >= g_ed.endLimit) g_ed.playing = false;
+    }
+
+    // run toward the target in whole-step chunks, within a time budget
+    auto t0 = std::chrono::steady_clock::now();
+    int guard = 0;
+    while (!g_ed.dead && m.step < g_ed.target) {
+        int n = std::min(60, g_ed.target - m.step);
+        int before = m.step;
+        try {
+            runGD(layer, static_cast<float>(n / 240.0));
+        } catch (std::exception const& e) {
+            FW_WARN("EDITOR GD threw while simulating: {}", e.what());
+            g_levelCorrupt = true;
+            g_ed.dead = true;
+            break;
+        }
+        if (m.step == before && ++guard > 2) break; // GD isn't stepping yet (resume delay): next frame
+        if (g_ed.playing) break;                       // real time: one chunk per frame
+        if (msSince(t0) > 12.0) break;
+    }
+    edBump();
+    if (g_ed.playing) g_ed.playhead = m.step;
+
+    bool arrived = g_ed.dead || m.step >= g_ed.target;
+    if (!arrived) return;
+    if (g_ed.building) {
+        g_ed.building = false;
+        for (int k = 0; k < 2; k++) g_ed.base[k] = g_ed.path[k];
+        int first = m.inputs.empty() ? 0 : m.inputs.front().step;
+        g_ed.wantSeek = std::max(0, first - 60);
+        g_ed.busy = Busy::Seeking;
+        FW_LOG("EDITOR loaded: path known to step {}, {} save-states{}", g_ed.knownTo, g_ed.states.size(),
+            g_ed.deathStep >= 0 ? fmt::format(", dies at step {}", g_ed.deathStep) : "");
+        return;
+    }
+    if (g_ed.busy == Busy::Resim) {
+        g_ed.busy = Busy::None;
+        if (g_ed.park >= 0) { g_ed.wantSeek = g_ed.park; g_ed.park = -1; g_ed.busy = Busy::Seeking; }
+        return;
+    }
+    if (!g_ed.playing && g_ed.wantSeek < 0) {
+        g_ed.busy = Busy::None;
+        g_ed.playhead = m.step;
+    }
+}
+
+} // namespace
+
+namespace fw::edrt {
+
+bool active() { return g_ed.active; }
+
+bool canStart(std::string* why) {
+    auto pl = PlayLayer::get();
+    auto& m = Macro::get();
+    auto fail = [&](char const* w) { if (why) *why = w; return false; };
+    if (!pl) return fail("Open a level first");
+    if (g_levelCorrupt) return fail("The level is in a bad state: re-enter it");
+    if (m.mode != Mode::Idle) return fail("Stop recording / playing / analyzing first");
+    if (pl->m_isPracticeMode) return fail("Leave practice mode first (the editor plays from the start)");
+    if (m.inputs.empty()) return fail("No macro for this level (or start position) yet: record one first");
+    return true;
+}
+
+void start() {
+    std::string why;
+    if (!canStart(&why)) { notify(why, NotificationIcon::Error); return; }
+    auto pl = PlayLayer::get();
+    auto& m = Macro::get();
+    g_ed = EdRt{};
+    g_ed.active = true;
+    g_ed.origInputs = m.inputs;
+    g_ed.origSubDts = m.subDts;
+    g_ed.interval = std::clamp(settingInt("editor-savestate-steps"), 30, 960);
+    g_ed.lastStep = m.inputs.back().step;
+    g_ed.endLimit = g_ed.lastStep + 480;
+    g_ed.title = pl->m_level ? std::string(pl->m_level->m_levelName) : std::string("level");
+    m.mode = Mode::Editing;
+    buildSchedule(m, false);
+    resetSplit();
+    fw::display::stop(pl);
+    if (auto fae = FMODAudioEngine::sharedEngine()) fae->stopAllMusic(false);
+    g_ed.building = true;
+    g_ed.busy = Busy::Building;
+    g_ed.target = g_ed.endLimit;
+    g_ed.knownTo = -1;
+    edRestore(pl, -1); // from the start
+    FW_LOG("EDITOR open '{}': {} inputs, cbf={}, save-state every {} steps", m.curKey, m.inputs.size(),
+        cbf() ? 1 : 0, g_ed.interval);
+}
+
+int save(std::vector<fw::ed::Edge> const& edges) {
+    if (!g_ed.active) return 0;
+    auto& m = Macro::get();
+    // windows survive only for clicks that weren't moved (indices remapped)
+    std::vector<SavedWin> wins;
+    for (size_t i = 0; i < edges.size(); i++) {
+        auto const& e = edges[i];
+        if (e.orig < 0 || std::fabs(e.t - e.origT) > 1e-9) continue;
+        for (auto const& sw : m.savedWindows)
+            if (sw.idx == e.orig) { auto c = sw; c.idx = static_cast<int>(i); wins.push_back(c); }
+    }
+    auto newInputs = inputsOf(edges);
+    m.inputs = newInputs;
+    int lost = static_cast<int>(m.savedWindows.size() - wins.size());
+    size_t kept = wins.size();
+    m.savedWindows = std::move(wins);
+    m.levelSetDirty = true;
+    // the replay check (PLAYBACK VERDICT) needs this macro's own track
+    bool full = g_ed.knownTo >= static_cast<int>(m.inputs.empty() ? 0 : m.inputs.back().step);
+    m.track.clear();
+    if (full)
+        for (int s = 0; s <= g_ed.knownTo && s < static_cast<int>(g_ed.raw.size()); s++) m.track.push_back(g_ed.raw[s]);
+    m.save();
+    m.saveTrack();
+    g_ed.origInputs = m.inputs;
+    g_ed.origSubDts = m.subDts;
+    if (!m.inputs.empty()) g_ed.lastStep = m.inputs.back().step;
+    FW_LOG("EDITOR saved '{}': {} inputs, windows kept {} (lost {}), track {}", m.curKey, m.inputs.size(), kept, lost,
+        full ? "updated" : "cleared (not simulated to the end)");
+    return lost;
+}
+
+void finish(bool doSave, std::vector<fw::ed::Edge> const& edges) {
+    if (!g_ed.active) return;
+    auto& m = Macro::get();
+    auto pl = PlayLayer::get();
+    if (doSave) {
+        save(edges);
+    } else {
+        m.inputs = g_ed.origInputs;
+        m.subDts = g_ed.origSubDts;
+    }
+    g_ed.states.clear();
+    g_ed.active = false;
+    m.mode = Mode::Idle;
+    if (pl && !g_levelCorrupt) {
+        pl->stopAllActions();
+        pl->resetLevel();
+        if (auto fae = FMODAudioEngine::sharedEngine()) fae->resumeAllMusic();
+    }
+    g_ed = EdRt{};
+}
+
+std::vector<fw::ed::Edge> loadEdges() { return edgesOf(g_ed.active ? g_ed.origInputs : Macro::get().inputs); }
+
+std::vector<Window> windows() {
+    std::vector<Window> out;
+    for (auto const& sw : Macro::get().savedWindows) {
+        if (sw.status == static_cast<char>(WStatus::Wide) || sw.window <= 0.0) continue;
+        Window w;
+        w.orig = sw.idx;
+        w.w = sw.window;
+        w.lo = std::isfinite(sw.lo) ? sw.lo : -sw.window / 2;
+        w.hi = std::isfinite(sw.hi) ? sw.hi : sw.window / 2;
+        out.push_back(w);
+    }
+    return out;
+}
+
+bool cbf() {
+    for (auto const& i : (g_ed.active ? g_ed.origInputs : Macro::get().inputs)) if (i.mid) return true;
+    return false;
+}
+
+bool twoPlayer() {
+    auto pl = PlayLayer::get();
+    if (pl && pl->m_levelSettings && pl->m_levelSettings->m_twoPlayerMode) return true;
+    for (auto const& i : g_ed.origInputs) if (i.mask & 2 || !i.player1) return true;
+    return false;
+}
+
+int lastStep() { return g_ed.lastStep; }
+int endLimit() { return g_ed.endLimit; }
+std::string title() { return g_ed.title; }
+Busy busy() { return g_ed.busy; }
+float progress() {
+    if (!g_ed.building || g_ed.endLimit <= 0) return 1.f;
+    return std::clamp(static_cast<float>(Macro::get().step) / g_ed.endLimit, 0.f, 1.f);
+}
+void seek(int step) {
+    if (!g_ed.active) return;
+    g_ed.playing = false;
+    g_ed.wantSeek = step;
+}
+int playhead() { return g_ed.playhead; }
+
+void apply(std::vector<fw::ed::Edge> const& edges, double firstChange) {
+    if (!g_ed.active || !std::isfinite(firstChange)) return;
+    auto& m = Macro::get();
+    auto newInputs = inputsOf(edges);
+    // exact CBF deltas stay only for steps whose inputs are unchanged
+    auto before = inputsByStep(m.inputs), after = inputsByStep(newInputs);
+    for (auto it = m.subDts.begin(); it != m.subDts.end();) {
+        auto b = before.find(it->first), a = after.find(it->first);
+        bool same = b != before.end() && a != after.end() && b->second == a->second;
+        it = same ? std::next(it) : m.subDts.erase(it);
+    }
+    m.inputs = std::move(newInputs);
+    buildSchedule(m, false);
+    edSeekSchedule(m, m.step);
+    int E = std::max(0, static_cast<int>(std::floor(firstChange + 1e-9)));
+    // everything from E on belonged to the old macro
+    g_ed.knownTo = std::min(g_ed.knownTo, E - 1);
+    for (auto it = g_ed.states.lower_bound(E); it != g_ed.states.end();) it = g_ed.states.erase(it);
+    if (g_ed.deathStep >= E) g_ed.deathStep = -1;
+    if (g_ed.endStep >= E) g_ed.endStep = -1;
+    if (m.step >= E) g_ed.live = false;
+    g_ed.resimFrom = E;
+    g_ed.wantResim = true;
+    g_ed.playing = false;
+    edBump();
+}
+
+void play(bool on) {
+    if (!g_ed.active || g_ed.building) return;
+    if (!on) { g_ed.playing = false; g_ed.busy = Busy::None; return; }
+    if (!g_ed.live || g_ed.dead) g_ed.wantSeek = g_ed.playhead;
+    g_ed.playing = true;
+    g_ed.playCarry = 0.0;
+    g_ed.busy = Busy::Playing;
+}
+bool playing() { return g_ed.playing; }
+
+std::vector<PathPt> const& path(int player) { return g_ed.path[player ? 1 : 0]; }
+std::vector<PathPt> const& basePath(int player) { return g_ed.base[player ? 1 : 0]; }
+std::vector<StepInfo> const& info() { return g_ed.info; }
+int knownTo() { return g_ed.knownTo; }
+int deathStep() { return g_ed.deathStep; }
+int endStep() { return g_ed.endStep; }
+uint64_t revision() { return g_ed.rev; }
+
+} // namespace fw::edrt
 
 // ---------------------------------------------------------------------------
 class $modify(MacroBGL, GJBaseGameLayer) {
@@ -2108,13 +2584,13 @@ class $modify(MacroBGL, GJBaseGameLayer) {
             m.inputs.push_back(e);
             return;
         }
-        if (m.mode == Mode::Playing || m.mode == Mode::Analyzing) return;
+        if (driving()) return;
         GJBaseGameLayer::handleButton(down, button, isPlayer1);
     }
 
     void processQueuedButtons(float dt, bool clearQueue) {
         auto& m = Macro::get();
-        if (m.mode == Mode::Playing || m.mode == Mode::Analyzing) {
+        if (driving()) {
             // boundary inputs (and any overdue mid-step ones) go in here, at the
             // point vanilla applies real inputs; this step's mid-step inputs wait
             // for the player update split
@@ -2194,6 +2670,8 @@ class $modify(MacroBGL, GJBaseGameLayer) {
         }
 
         if (pcPl && deathMode() != "Off") recordPath(pcPl);
+        if (m.mode == Mode::Editing && !fw::ghost::isSim())
+            if (auto pl = PlayLayer::get(); pl && static_cast<GJBaseGameLayer*>(pl) == this) edAfterStep(pl);
 
         if (m.mode == Mode::Recording && m_player1) {
             auto pos = m_player1->getPosition();
@@ -2351,11 +2829,15 @@ class $modify(MacroBGL, GJBaseGameLayer) {
         // GD queues them here with timestamps; Click Between Frames reads this
         // queue to split steps, so clearing it keeps CBF from splitting (and
         // perturbing) a replay when you touch the mouse.
-        if ((m.mode == Mode::Playing || m.mode == Mode::Analyzing)
-            && static_cast<GJBaseGameLayer*>(PlayLayer::get()) == this)
+        if (driving() && static_cast<GJBaseGameLayer*>(PlayLayer::get()) == this)
             m_queuedButtons.clear();
 
         if (g_levelCorrupt) return; // frozen after a GD error (see abortAnalysis)
+        if (m.mode == Mode::Editing) {
+            // frozen unless the macro editor is simulating (edFrame runs GD)
+            edFrame(this, dt, [](GJBaseGameLayer* l, float d) { static_cast<MacroBGL*>(l)->GJBaseGameLayer::update(d); });
+            return;
+        }
         if (m.mode == Mode::Analyzing) {
             // Run tests back to back inside this frame until the time budget is
             // used (one test per frame made every run cost >= 1 rendered frame).
@@ -2469,7 +2951,8 @@ class $modify(FwCheckpoint, CheckpointObject) {
         auto key = static_cast<CheckpointObject*>(this);
         g_cps.erase(key);
         auto mode = Macro::get().mode;
-        if ((mode == Mode::Recording || mode == Mode::Analyzing) && PlayLayer::get() && !fw::ghost::isSim()) {
+        if ((mode == Mode::Recording || mode == Mode::Analyzing || mode == Mode::Editing) && PlayLayer::get()
+            && !fw::ghost::isSim()) {
             if (g_stepDepth > 0) g_pendingCps.push_back(key); // mid-step: once the step is done
             else g_cps[key] = snapNow();
         }
@@ -2733,6 +3216,11 @@ class $modify(MacroPlayLayer, PlayLayer) {
         g_cps.clear();
         g_pendingCps.clear();
         g_respawnCp = nullptr;
+        if (g_ed.active) { // a level opened mid-edit (shouldn't happen): drop the edit
+            Macro::get().inputs = g_ed.origInputs;
+            Macro::get().subDts = g_ed.origSubDts;
+        }
+        g_ed = EdRt{};
         if (!PlayLayer::init(level, useReplay, dontCreateObjects)) return false;
         auto& m = Macro::get();
         // a fresh level never starts inside a macro op: a leaked Playing /
@@ -2756,6 +3244,11 @@ class $modify(MacroPlayLayer, PlayLayer) {
         if (m.mode == Mode::Analyzing) setAnalyzeSpeed(1.f);
         if (m.mode == Mode::Playing) logPlaybackVerdict("quit");
         if (m.mode == Mode::Recording) stopRecording(); // leaving must not lose the run
+        if (g_ed.active) { // left the level mid-edit: the macro stays as it was
+            m.inputs = g_ed.origInputs;
+            m.subDts = g_ed.origSubDts;
+            g_ed = EdRt{};
+        }
         m.mode = Mode::Idle;
         m.anchors.clear();
         resetSplit();
@@ -2817,6 +3310,11 @@ class $modify(MacroPlayLayer, PlayLayer) {
             g_play = PlayDiag{};
             fw::display::restart(this); // fresh attempt: clear rings, zero the counter
             if (m.haveSeed) { m_randomSeed = m.seed1; m_replayRandSeed = m.seed2; }
+        } else if (m.mode == Mode::Editing) {
+            m.schedPos = 0;
+            m.step = 0;
+            m.gameTime = 0;
+            if (m.haveSeed) { m_randomSeed = m.seed1; m_replayRandSeed = m.seed2; }
         } else if (m.mode == Mode::Analyzing) {
             if (!m.inBeginTest && !m.testResolved) {
                 // GD reset the level on its own (the post-death auto-restart):
@@ -2835,7 +3333,7 @@ class $modify(MacroPlayLayer, PlayLayer) {
     void startGame() {
         PlayLayer::startGame();
         auto& m = Macro::get();
-        if ((m.mode == Mode::Playing || m.mode == Mode::Analyzing) && m.haveSeed) {
+        if (driving() && m.haveSeed) {
             m_randomSeed = m.seed1;
             m_replayRandSeed = m.seed2;
         }
@@ -2879,6 +3377,13 @@ class $modify(MacroPlayLayer, PlayLayer) {
         auto& m = Macro::get();
         if (m.mode == Mode::Analyzing && !m.inBeginTest && p && p->m_isDead)
             resolveDeath(m, std::max(0, m.step - 1));
+        if (m.mode == Mode::Editing && p && p->m_isDead && !g_ed.dead) {
+            g_ed.dead = true;
+            g_ed.live = false;
+            g_ed.deathStep = m.step;
+            edStop();
+            edBump();
+        }
         // frame windows on death (normal play / recording, not the macro's own runs)
         if ((m.mode == Mode::Idle || m.mode == Mode::Recording) && p && p->m_isDead
             && !g_deathShown && macroEnabled() && deathMode() != "Off") {
@@ -2891,6 +3396,10 @@ class $modify(MacroPlayLayer, PlayLayer) {
         auto& m = Macro::get();
         if (m.mode == Mode::Analyzing) {
             resolveLevelEnd(m); // reached the end = survived; skip the ending itself
+            return;
+        }
+        if (m.mode == Mode::Editing) {
+            if (!g_ed.dead) { g_ed.dead = true; g_ed.live = false; g_ed.endStep = m.step; edStop(); edBump(); }
             return;
         }
         PlayLayer::playEndAnimationToPos(pos);
@@ -2906,6 +3415,7 @@ class $modify(MacroPlayLayer, PlayLayer) {
                 resolveDeath(m, m.lastProgressStep);
             return;
         }
+        if (m.mode == Mode::Editing) return; // the editor decides where the level goes next
         PlayLayer::delayedResetLevel();
     }
 
@@ -2914,6 +3424,10 @@ class $modify(MacroPlayLayer, PlayLayer) {
         if (m.mode == Mode::Analyzing) {
             resolveLevelEnd(m);
             return; // don't actually end the level mid-analysis
+        }
+        if (m.mode == Mode::Editing) {
+            if (!g_ed.dead) { g_ed.dead = true; g_ed.live = false; g_ed.endStep = m.step; edStop(); edBump(); }
+            return;
         }
         if (m.mode == Mode::Playing) logPlaybackVerdict("complete");
         bool wasRecording = m.mode == Mode::Recording;
@@ -2931,24 +3445,24 @@ class $modify(MacroPlayLayer, PlayLayer) {
 // level only, so GD's own level-start flow (music "prepared" etc.) is intact.
 class $modify(FwQuietAudio, FMODAudioEngine) {
     void playMusic(gd::string path, bool shouldLoop, float fadeInTime, int channel) {
-        if (Macro::get().mode == Mode::Analyzing) return;
+        if (Macro::get().mode == Mode::Analyzing || Macro::get().mode == Mode::Editing) return;
         FMODAudioEngine::playMusic(path, shouldLoop, fadeInTime, channel);
     }
     // the checkpoint's saved song position: saving/restoring it seeks the song
     void saveAudioState(FMODAudioState& st) {
-        if (Macro::get().mode == Mode::Analyzing) return;
+        if (Macro::get().mode == Mode::Analyzing || Macro::get().mode == Mode::Editing) return;
         FMODAudioEngine::saveAudioState(st);
     }
     void loadAudioState(FMODAudioState& st) {
-        if (Macro::get().mode == Mode::Analyzing) return;
+        if (Macro::get().mode == Mode::Analyzing || Macro::get().mode == Mode::Editing) return;
         FMODAudioEngine::loadAudioState(st);
     }
     void setMusicTimeMS(unsigned int time, bool dontWait, int musicID) {
-        if (Macro::get().mode == Mode::Analyzing) return;
+        if (Macro::get().mode == Mode::Analyzing || Macro::get().mode == Mode::Editing) return;
         FMODAudioEngine::setMusicTimeMS(time, dontWait, musicID);
     }
     void loadAndPlayMusic(gd::string path, unsigned int time, int musicID) {
-        if (Macro::get().mode == Mode::Analyzing) return;
+        if (Macro::get().mode == Mode::Analyzing || Macro::get().mode == Mode::Editing) return;
         FMODAudioEngine::loadAndPlayMusic(path, time, musicID);
     }
 };
@@ -3078,7 +3592,7 @@ class $modify(MacroPauseLayer, PauseLayer) {
 // ---------------------------------------------------------------------------
 $execute {
     listenForKeybindSettingPresses("macro-record", [](Keybind const&, bool down, bool repeat, double) -> bool {
-        if (!macroEnabled()) return false;
+        if (!macroEnabled() || Macro::get().mode == Mode::Editing) return false;
         if (down && !repeat) {
             if (Macro::get().mode == Mode::Recording) stopRecording();
             else startRecording();
@@ -3087,7 +3601,7 @@ $execute {
         return false;
     });
     listenForKeybindSettingPresses("macro-play", [](Keybind const&, bool down, bool repeat, double) -> bool {
-        if (!macroEnabled()) return false;
+        if (!macroEnabled() || Macro::get().mode == Mode::Editing) return false;
         if (down && !repeat) {
             if (Macro::get().mode == Mode::Playing) stopPlaying();
             else startPlaying();
@@ -3096,7 +3610,7 @@ $execute {
         return false;
     });
     listenForKeybindSettingPresses("macro-analyze", [](Keybind const&, bool down, bool repeat, double) -> bool {
-        if (!macroEnabled()) return false;
+        if (!macroEnabled() || Macro::get().mode == Mode::Editing) return false;
         if (down && !repeat) {
             if (Macro::get().mode == Mode::Analyzing) {
                 Macro::get().mode = Mode::Idle;

@@ -239,6 +239,29 @@ The window extender's decision logic is also tested without GD:
 
 ---
 
+## Step 4h: Macro editor (v1.21.0)
+
+1. In a level with a macro (normal mode, not practice), pause > **Edit
+   macro**. The level stays on screen; the timeline appears at the bottom.
+   It first plays the macro through once (`Loading the macro... N%`); the
+   log says `[fw] EDITOR loaded: path known to step ..., N save-states`.
+2. Click a click marker on the timeline: the level jumps to just before it,
+   with the path (cyan), the clicks (green = press, orange = release) and the
+   frame windows drawn on the level.
+3. Drag a click a little (Shift = finer). Let go: `Re-simulating the
+   change...`, then the new path. If the change kills you, the status turns
+   red (`Dies at frame ...`) and a red X marks the spot.
+4. **A** adds a click at the playhead, **Del** deletes the selected one,
+   Ctrl+Z / Ctrl+Y undo / redo, **Space** plays, the wheel zooms the timeline.
+5. **Save**, then **Exit**, and press **K**: the replay uses the edited
+   macro (`VERDICT=EXACT` if it was simulated to the end before saving).
+
+❌ Send the log if: the level shown doesn't match the playhead, the path
+jumps after a seek (save-states drifting), or GD crashes when you open,
+seek, or exit.
+
+---
+
 ## Step 5: Run it twice (determinism)
 
 Press **N** again on the same macro and let it finish. Compare the two
