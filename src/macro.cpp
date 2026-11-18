@@ -865,8 +865,8 @@ void practiceRespawnFix(PlayLayer* pl, CpInfo const& c) {
     // how far off GD's own restore was (diagnostic: tells whether this matters)
     double dx = 0, dy = 0, dvy = 0;
     if (use[0]) {
-        dx = ps[0]->m_positionX - c.p1.positionX;
-        dy = ps[0]->m_positionY - c.p1.positionY;
+        dx = ps[0]->getPositionX() - c.p1.nodePos.x;
+        dy = ps[0]->getPositionY() - c.p1.nodePos.y;
         dvy = ps[0]->m_yVelocity - c.p1.m_yVelocity;
         fw::snap::apply(ps[0], c.p1);
     }
@@ -2725,9 +2725,11 @@ class $modify(MacroBGL, GJBaseGameLayer) {
         bool rec = m.mode == Mode::Recording && pcPl && m_player1;
         bool edWatch = m.mode == Mode::Editing && g_ed.stillWatch > 0 && m_player1 && !m_player1->m_isPlatformer
             && static_cast<GJBaseGameLayer*>(PlayLayer::get()) == this && !fw::ghost::isSim();
-        double ex = edWatch ? m_player1->m_positionX : 0.0, ey = edWatch ? m_player1->m_positionY : 0.0;
+        CCPoint ep = edWatch ? m_player1->getPosition() : CCPoint{};
         bool watchStill = rec && g_stillWatch > 0 && !m_player1->m_isPlatformer;
-        double sx = watchStill ? m_player1->m_positionX : 0.0, sy = watchStill ? m_player1->m_positionY : 0.0;
+        // the node position: updated every step (GameObject::m_positionX/Y is NOT for
+        // the player -- reading it made every step look "still", v1.19.1-1.21.3)
+        CCPoint sp = watchStill ? m_player1->getPosition() : CCPoint{};
         {
             struct Depth { Depth() { g_stepDepth++; } ~Depth() { g_stepDepth--; } } depth; // (GD may throw)
             GJBaseGameLayer::processCommands(dt, isHalfTick, isLastTick);
@@ -2735,8 +2737,7 @@ class $modify(MacroBGL, GJBaseGameLayer) {
         if (!g_pendingCps.empty() && g_stepDepth == 0) snapPendingCheckpoints();
         if (edWatch) {
             g_ed.stillWatch--;
-            if (!m_player1->m_isDead && m_player1->m_positionX == ex && m_player1->m_positionY == ey
-                && g_ed.stillFound < 8) {
+            if (!m_player1->m_isDead && m_player1->getPosition().equals(ep) && g_ed.stillFound < 3) {
                 m.gameTime -= dt; // held still: not a step of the run
                 m.step = static_cast<int>(std::llround(m.gameTime * 240.0));
                 g_ed.stillFound++;
@@ -2748,8 +2749,7 @@ class $modify(MacroBGL, GJBaseGameLayer) {
         }
         if (watchStill) {
             g_stillWatch--;
-            if (!m_player1->m_isDead && m_player1->m_positionX == sx && m_player1->m_positionY == sy
-                && g_stillFound < 8) {
+            if (!m_player1->m_isDead && m_player1->getPosition().equals(sp) && g_stillFound < 3) {
                 // held still: not a step of the run (inputs this step land on the next one)
                 m.gameTime -= dt;
                 m.step = static_cast<int>(std::llround(m.gameTime * 240.0));
