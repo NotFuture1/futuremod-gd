@@ -2126,6 +2126,11 @@ struct EdRt {
     std::string title;
     int stillWatch = 0; // steps after a save-state restore to check for GD's still step
     int stillFound = 0;
+    bool playPending = false; // Play pressed: first get to the playhead, then play
+    int verifyTo = -1;        // after a restore: steps already known, to check the restore against
+    int verifyFrom = -1;
+    bool verifyLogged = false;
+    int chunk = 1;            // physics steps per GD update while simulating
 };
 EdRt g_ed;
 bool g_edInTick = false; // the editor is running GD's update itself
@@ -2229,6 +2234,9 @@ void edRestore(PlayLayer* pl, int s) {
     g_ed.dead = false;
     g_ed.contiguous = m.step <= g_ed.knownTo + 1;
     g_ed.waitFrame = true;
+    g_ed.verifyFrom = m.step;
+    g_ed.verifyTo = g_ed.knownTo;
+    g_ed.verifyLogged = false;
 }
 
 int edClampSeek(int s) {
@@ -2256,7 +2264,19 @@ void edAfterStep(PlayLayer* pl) {
         auto& slot = g_ed.path[k][s];
         if (!p || !p->getParent() || (k == 1 && !dual)) { slot = {}; continue; }
         auto w = pl->m_objectLayer->convertToNodeSpace(p->getParent()->convertToWorldSpace(p->getPosition()));
+        // a run from a save-state must retrace what's already known there
+        if (k == 0 && s <= g_ed.verifyTo && slot.ok && !g_ed.verifyLogged
+            && (std::fabs(slot.x - w.x) > 0.01f || std::fabs(slot.y - w.y) > 0.01f)) {
+            g_ed.verifyLogged = true;
+            FW_WARN("EDITOR run from step {} left the known path at step {}: dx {:+.4f} dy {:+.4f} (chunk {})",
+                g_ed.verifyFrom, s, w.x - slot.x, w.y - slot.y, g_ed.chunk);
+        }
         slot = { w.x, w.y, true };
+    }
+    // got past a death / end seen before without it happening: that one was wrong
+    if (g_ed.contiguous && !g_ed.dead) {
+        if (g_ed.deathStep >= 0 && s > g_ed.deathStep) g_ed.deathStep = -1;
+        if (g_ed.endStep >= 0 && s > g_ed.endStep) g_ed.endStep = -1;
     }
     if (pl->m_player1) {
         auto pos = pl->m_player1->getPosition();
@@ -2319,6 +2339,14 @@ void edFrame(GJBaseGameLayer* layer, float dt, void (*runGD)(GJBaseGameLayer*, f
         if (!forward && !(g_ed.live && !g_ed.dead && m.step == s)) { edRestore(pl, s); edBump(); return; }
     }
 
+    // Steps per GD update: like playing at your frame rate (auto), so the
+    // editor's runs match a K replay -- GD does some things once per update,
+    // and big chunks (a speedhack-like fast-forward) can play out differently.
+    {
+        int set = settingInt("editor-sim-chunk");
+        int fps = std::clamp(static_cast<int>(std::lround(dt * 240.0)), 1, 8);
+        g_ed.chunk = set > 0 ? std::clamp(set, 1, 60) : fps;
+    }
     if (g_ed.playing) {
         double speed = Mod::get()->getSettingValue<double>("editor-play-speed");
         double steps = g_ed.playCarry + dt * 240.0 * speed;
@@ -2332,7 +2360,7 @@ void edFrame(GJBaseGameLayer* layer, float dt, void (*runGD)(GJBaseGameLayer*, f
     auto t0 = std::chrono::steady_clock::now();
     int guard = 0;
     while (!g_ed.dead && m.step < g_ed.target) {
-        int n = std::min(60, g_ed.target - m.step);
+        int n = std::min(g_ed.chunk, g_ed.target - m.step);
         int before = m.step;
         try {
             runGD(layer, static_cast<float>(n / 240.0));
@@ -2343,7 +2371,7 @@ void edFrame(GJBaseGameLayer* layer, float dt, void (*runGD)(GJBaseGameLayer*, f
             break;
         }
         if (m.step == before && ++guard > 2) break; // GD isn't stepping yet (resume delay): next frame
-        if (g_ed.playing) break;                       // real time: one chunk per frame
+        if (g_ed.playing && m.step >= g_ed.target) break; // real time: this frame's steps only
         if (msSince(t0) > 12.0) break;
     }
     edBump();
@@ -2369,6 +2397,14 @@ void edFrame(GJBaseGameLayer* layer, float dt, void (*runGD)(GJBaseGameLayer*, f
     if (!g_ed.playing && g_ed.wantSeek < 0) {
         g_ed.busy = Busy::None;
         g_ed.playhead = m.step;
+        if (g_ed.playPending) { // at the playhead now: play from here
+            g_ed.playPending = false;
+            if (!g_ed.dead) {
+                g_ed.playing = true;
+                g_ed.playCarry = 0.0;
+                g_ed.busy = Busy::Playing;
+            }
+        }
     }
 }
 
@@ -2540,6 +2576,7 @@ float progress() {
 void seek(int step) {
     if (!g_ed.active) return;
     g_ed.playing = false;
+    g_ed.playPending = false;
     g_ed.wantSeek = step;
 }
 int playhead() { return g_ed.playhead; }
@@ -2573,13 +2610,25 @@ void apply(std::vector<fw::ed::Edge> const& edges, double firstChange) {
 
 void play(bool on) {
     if (!g_ed.active || g_ed.building) return;
-    if (!on) { g_ed.playing = false; g_ed.busy = Busy::None; return; }
-    if (!g_ed.live || g_ed.dead) g_ed.wantSeek = g_ed.playhead;
+    if (!on) {
+        g_ed.playing = false;
+        g_ed.playPending = false;
+        if (g_ed.busy == Busy::Playing) g_ed.busy = Busy::None;
+        return;
+    }
+    auto& m = Macro::get();
+    if (!g_ed.live || g_ed.dead || m.step != g_ed.playhead || g_ed.busy != Busy::None) {
+        // get the level to the playhead first (a restore lands up to a
+        // save-state earlier), then play from exactly there
+        g_ed.wantSeek = g_ed.playhead;
+        g_ed.playPending = true;
+        return;
+    }
     g_ed.playing = true;
     g_ed.playCarry = 0.0;
     g_ed.busy = Busy::Playing;
 }
-bool playing() { return g_ed.playing; }
+bool playing() { return g_ed.playing || g_ed.playPending; }
 
 std::vector<PathPt> const& path(int player) { return g_ed.path[player ? 1 : 0]; }
 std::vector<PathPt> const& basePath(int player) { return g_ed.base[player ? 1 : 0]; }

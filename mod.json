@@ -5,7 +5,7 @@
         "mac": "2.2081",
         "android": "2.2081"
     },
-    "version": "v1.21.2",
+    "version": "v1.21.3",
     "id": "future.futuremod",
     "name": "Future Mod",
     "developer": "future",
@@ -198,6 +198,14 @@
             "default": 120,
             "min": 30,
             "max": 960
+        },
+        "editor-sim-chunk": {
+            "name": "Steps per update while simulating",
+            "description": "0 = auto: as many physics steps per GD update as playing at your frame rate does, so the editor's runs match a K replay (most accurate). Higher = loads and re-simulates faster, but GD can play big chunks out differently (false deaths).",
+            "type": "int",
+            "default": 0,
+            "min": 0,
+            "max": 60
         },
         "editor-play-speed": {
             "name": "Play speed",
