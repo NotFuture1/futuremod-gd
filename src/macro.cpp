@@ -983,8 +983,7 @@ void stopRecording() {
         m.inputs.size(), nMid, m.inputs.back().step, m.subDts.size(), nFix, g_stillTotal,
         g_dt.lo, g_dt.hi, g_dt.odd, g_dt.steps);
     if (g_dt.steps > 0 && g_dt.odd * 20 > g_dt.steps)
-        notify("Recorded with a speedhack on: physics steps weren't 1/240 s,\n"
-               "so the replay can't match exactly. Record at normal speed.", NotificationIcon::Warning);
+        FW_WARN("RECORDED: {} of {} physics steps weren't 1/240 s even with whole-step framing", g_dt.odd, g_dt.steps);
     notify(fmt::format("Macro: recorded + saved {} inputs", m.inputs.size()), NotificationIcon::Success);
 }
 
@@ -2413,6 +2412,24 @@ class $modify(MacroBGL, GJBaseGameLayer) {
                 updateHud(); // live progress + ETA
             }
         } else {
+            // Speedhack-proof steps while recording / replaying: hand GD whole
+            // physics steps only (the rest carries to the next frame). GD's own
+            // timer already rounds to whole steps, so normally this changes
+            // nothing; it guarantees that a speedhack (any speed) only changes
+            // how many steps run per frame, never how long one step is -- so a
+            // run recorded slowed down replays exactly at normal speed.
+            static double carry = 0.0;
+            bool fixSteps = (m.mode == Mode::Recording || m.mode == Mode::Playing)
+                && static_cast<GJBaseGameLayer*>(PlayLayer::get()) == this && m_started && m_resumeTimer <= 0;
+            if (fixSteps) {
+                double step = std::max(m_gameState.m_timeWarp, 1.0f) / 240.0;
+                double total = carry + dt;
+                double k = std::floor(total / step + 1e-6);
+                carry = std::max(0.0, total - k * step);
+                dt = static_cast<float>(k * step);
+            } else {
+                carry = 0.0;
+            }
             GJBaseGameLayer::update(dt);
             // after the camera moved this frame: keep the rings pinned to the level
             if (static_cast<GJBaseGameLayer*>(PlayLayer::get()) == this)
