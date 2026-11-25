@@ -356,13 +356,17 @@ private:
             }
         }
         // the edited macro's path where it's known
+        int firstDeath = rt::deathStep();
         if (settingOn("editor-show-path")) {
             for (int k = 0; k < 2; k++) {
                 auto const& p = rt::path(k);
-                for (int s = from + 1; s <= std::min(to, known) && s < static_cast<int>(p.size()); s++)
-                    if (p[s - 1].ok && p[s].ok)
-                        n->drawSegment(W(p[s - 1].x, p[s - 1].y), W(p[s].x, p[s].y), 1.1f,
-                            k ? col(1.f, 0.55f, 0.8f, 0.9f) : col(0.3f, 0.9f, 1.f, 0.9f));
+                for (int s = from + 1; s <= std::min(to, known) && s < static_cast<int>(p.size()); s++) {
+                    if (!p[s - 1].ok || !p[s].ok) continue;
+                    // past the first death the run would really be over: red
+                    bool after = firstDeath >= 0 && s > firstDeath;
+                    n->drawSegment(W(p[s - 1].x, p[s - 1].y), W(p[s].x, p[s].y), 1.1f,
+                        after ? col(1.f, 0.35f, 0.3f, 0.7f) : (k ? col(1.f, 0.55f, 0.8f, 0.9f) : col(0.3f, 0.9f, 1.f, 0.9f)));
+                }
             }
         }
         // frame windows along the path, and the clicks
@@ -393,12 +397,13 @@ private:
             else n->drawCircle(wp, sel ? 4.5f : 3.f, col(0, 0, 0, 0), 1.2f, c, 16);
             if (sel) n->drawCircle(wp, 8.f, col(0, 0, 0, 0), 1.4f, col(1.f, 0.95f, 0.3f, 1.f), 24);
         }
-        // where it dies
-        int d = rt::deathStep();
-        if (d >= 0 && d < static_cast<int>(rt::path(0).size()) && rt::path(0)[d].ok) {
+        // where it dies (every death; the first one bigger)
+        for (int d : rt::deaths()) {
+            if (d < from || d > to || d >= static_cast<int>(rt::path(0).size()) || !rt::path(0)[d].ok) continue;
             auto p = W(rt::path(0)[d].x, rt::path(0)[d].y);
-            n->drawSegment({ p.x - 7, p.y - 7 }, { p.x + 7, p.y + 7 }, 1.6f, col(1, 0.2f, 0.2f, 1));
-            n->drawSegment({ p.x - 7, p.y + 7 }, { p.x + 7, p.y - 7 }, 1.6f, col(1, 0.2f, 0.2f, 1));
+            float r = d == firstDeath ? 8.f : 5.f;
+            n->drawSegment({ p.x - r, p.y - r }, { p.x + r, p.y + r }, 1.6f, col(1, 0.2f, 0.2f, 1));
+            n->drawSegment({ p.x - r, p.y + r }, { p.x + r, p.y - r }, 1.6f, col(1, 0.2f, 0.2f, 1));
         }
     }
 
@@ -531,11 +536,23 @@ private:
             }
         }
 
-        // ---- death / end / playhead
+        // ---- deaths (red: where it touches something deadly) / end / playhead
         int d = rt::deathStep();
-        if (d >= 0 && d >= t0 && d <= t1) {
-            float x = xOf(d);
-            n->drawSegment({ x, m_p2Y0 }, { x, m_modeY1 }, 1.2f, col(1.f, 0.25f, 0.25f, 1.f));
+        {
+            auto const& hit = rt::hits();
+            int a = std::max(0, static_cast<int>(std::floor(t0))), b = std::min({ static_cast<int>(hit.size()) - 1, known, static_cast<int>(std::ceil(t1)) });
+            for (int s = a; s <= b; s++) {
+                if (!hit[s]) continue;
+                int e = s;
+                while (e + 1 <= b && hit[e + 1]) e++;
+                rect(n, xOf(s), m_modeY1 - 2.f, std::max(xOf(e + 1), xOf(s) + 1.f), m_modeY1 + 1.f, col(1.f, 0.25f, 0.25f, 0.9f));
+                s = e;
+            }
+            for (int ds : rt::deaths()) {
+                if (ds < t0 || ds > t1) continue;
+                float x = xOf(ds);
+                n->drawSegment({ x, m_p2Y0 }, { x, m_modeY1 }, ds == d ? 1.2f : 0.7f, col(1.f, 0.25f, 0.25f, ds == d ? 1.f : 0.7f));
+            }
         }
         int en = rt::endStep();
         if (en >= 0 && en >= t0 && en <= t1) {
@@ -557,7 +574,7 @@ private:
         rect(n, std::max(m_L, ox(t0)), m_ovY0, std::min(m_R, ox(t1)), m_ovY1, col(1, 1, 1, 0.18f));
         for (auto const& e : m_model.edges())
             if (e.down) n->drawSegment({ ox(e.t), m_ovY0 + 2.f }, { ox(e.t), m_ovY1 - 1.f }, 0.3f, col(0.4f, 1.f, 0.5f, 0.5f));
-        if (d >= 0) n->drawSegment({ ox(d), m_ovY0 }, { ox(d), m_ovY1 }, 0.8f, col(1, 0.25f, 0.25f, 1));
+        for (int ds : rt::deaths()) n->drawSegment({ ox(ds), m_ovY0 }, { ox(ds), m_ovY1 }, 0.8f, col(1, 0.25f, 0.25f, 1));
         n->drawSegment({ ox(rt::playhead()), m_ovY0 }, { ox(rt::playhead()), m_ovY1 }, 0.6f, col(1, 1, 1, 1));
     }
 
@@ -569,7 +586,11 @@ private:
         int d = rt::deathStep(), en = rt::endStep();
         if (busy == rt::Busy::Building) st = fmt::format("Loading the macro... {:.0f}%", rt::progress() * 100.f);
         else if (busy == rt::Busy::Resim) st = "Re-simulating the change...";
-        else if (d >= 0) st = fmt::format("Dies at frame {} ({:.2f} s)", d, d / 240.0);
+        else if (d >= 0) {
+            size_t nd = rt::deaths().size();
+            st = fmt::format("Dies at frame {} ({:.2f} s){}", d, d / 240.0,
+                nd > 1 ? fmt::format(", {} deaths in total (shown past the first)", nd) : std::string());
+        }
         else if (en >= 0) st = fmt::format("Reaches the end (frame {})", en);
         else st = fmt::format("Simulated to frame {}", std::max(0, rt::knownTo()));
         st += fmt::format("   |   frame {}{}", rt::playhead(), m_model.dirty() ? "   |   unsaved" : "");

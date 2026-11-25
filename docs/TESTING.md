@@ -250,7 +250,9 @@ The window extender's decision logic is also tested without GD:
    frame windows drawn on the level.
 3. Drag a click a little (Shift = finer). Let go: `Re-simulating the
    change...`, then the new path. If the change kills you, the status turns
-   red (`Dies at frame ...`) and a red X marks the spot.
+   red (`Dies at frame ...`) and a red X marks the spot. The editor keeps
+   going through deaths (the path turns red after the first one), so the
+   whole macro stays viewable; Play pauses at each death.
 4. **A** adds a click at the playhead, **Del** deletes the selected one,
    Ctrl+Z / Ctrl+Y undo / redo, **Space** plays, the wheel zooms the timeline.
 5. **Save**, then **Exit**, and press **K**: the replay uses the edited

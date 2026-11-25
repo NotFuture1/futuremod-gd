@@ -5,7 +5,7 @@
         "mac": "2.2081",
         "android": "2.2081"
     },
-    "version": "v1.21.4",
+    "version": "v1.21.5",
     "id": "future.futuremod",
     "name": "Future Mod",
     "developer": "future",
@@ -214,6 +214,12 @@
             "default": 1.0,
             "min": 0.1,
             "max": 2.0
+        },
+        "editor-play-stop-at-death": {
+            "name": "Play stops at a death",
+            "description": "The editor goes through deaths (like noclip) so you can see the whole macro, with every death marked in red. With this on, Play (Space) pauses at each death.",
+            "type": "bool",
+            "default": true
         },
         "editor-default-hold": {
             "name": "Added click length (frames)",

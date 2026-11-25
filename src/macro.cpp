@@ -2119,7 +2119,11 @@ struct EdRt {
     std::vector<fw::edrt::PathPt> path[2], base[2];
     std::vector<std::pair<float, float>> raw; // player 1's getPosition() per step (the macro's track format)
     std::vector<fw::edrt::StepInfo> info;
-    int knownTo = -1, deathStep = -1, endStep = -1;
+    int knownTo = -1, endStep = -1;
+    // Deaths: the editor runs THROUGH them (like noclip) so the whole macro
+    // stays viewable; hit[s] = the player touched something deadly in step s.
+    // A death = the first step of a run of hits.
+    std::vector<uint8_t> hit;
     uint64_t rev = 1;
     std::vector<InputEdge> origInputs;
     std::unordered_map<int, std::vector<float>> origSubDts;
@@ -2133,6 +2137,7 @@ struct EdRt {
     int chunk = 1;            // physics steps per GD update while simulating
 };
 EdRt g_ed;
+bool g_edHit = false;    // something deadly was touched this step (editor)
 bool g_edInTick = false; // the editor is running GD's update itself
 struct EdDiag { float t = 0.f; int calls = 0, stepped = 0; } g_edDiag;
 
@@ -2241,7 +2246,6 @@ void edRestore(PlayLayer* pl, int s) {
 
 int edClampSeek(int s) {
     s = std::clamp(s, 0, g_ed.endLimit);
-    if (g_ed.deathStep >= 0) s = std::min(s, g_ed.deathStep);
     if (g_ed.endStep >= 0) s = std::min(s, g_ed.endStep);
     return s;
 }
@@ -2254,6 +2258,7 @@ void edAfterStep(PlayLayer* pl) {
     size_t need = static_cast<size_t>(s) + 1;
     if (g_ed.info.size() < need) {
         g_ed.info.resize(need);
+        g_ed.hit.resize(need, 0);
         g_ed.raw.resize(need, { kNoPos, kNoPos });
         for (int k = 0; k < 2; k++) g_ed.path[k].resize(need);
     }
@@ -2273,11 +2278,15 @@ void edAfterStep(PlayLayer* pl) {
         }
         slot = { w.x, w.y, true };
     }
-    // got past a death / end seen before without it happening: that one was wrong
-    if (g_ed.contiguous && !g_ed.dead) {
-        if (g_ed.deathStep >= 0 && s > g_ed.deathStep) g_ed.deathStep = -1;
-        if (g_ed.endStep >= 0 && s > g_ed.endStep) g_ed.endStep = -1;
+    bool newDeath = g_edHit && (s == 0 || !g_ed.hit[s - 1]);
+    g_ed.hit[s] = g_edHit ? 1 : 0;
+    g_edHit = false;
+    if (newDeath && g_ed.playing && Mod::get()->getSettingValue<bool>("editor-play-stop-at-death")) {
+        g_ed.playing = false;
+        g_ed.target = s;
     }
+    // got past an end seen before: that one was wrong
+    if (g_ed.contiguous && !g_ed.dead && g_ed.endStep >= 0 && s > g_ed.endStep) g_ed.endStep = -1;
     if (pl->m_player1) {
         auto pos = pl->m_player1->getPosition();
         g_ed.raw[s] = { pos.x, pos.y };
@@ -2385,8 +2394,9 @@ void edFrame(GJBaseGameLayer* layer, float dt, void (*runGD)(GJBaseGameLayer*, f
         int first = m.inputs.empty() ? 0 : m.inputs.front().step;
         g_ed.wantSeek = std::max(0, first - 60);
         g_ed.busy = Busy::Seeking;
+        int d = fw::edrt::deathStep();
         FW_LOG("EDITOR loaded: path known to step {}, {} save-states{}", g_ed.knownTo, g_ed.states.size(),
-            g_ed.deathStep >= 0 ? fmt::format(", dies at step {}", g_ed.deathStep) : "");
+            d >= 0 ? fmt::format(", first death at step {}", d) : "");
         return;
     }
     if (g_ed.busy == Busy::Resim) {
@@ -2599,7 +2609,6 @@ void apply(std::vector<fw::ed::Edge> const& edges, double firstChange) {
     // everything from E on belonged to the old macro
     g_ed.knownTo = std::min(g_ed.knownTo, E - 1);
     for (auto it = g_ed.states.lower_bound(E); it != g_ed.states.end();) it = g_ed.states.erase(it);
-    if (g_ed.deathStep >= E) g_ed.deathStep = -1;
     if (g_ed.endStep >= E) g_ed.endStep = -1;
     if (m.step >= E) g_ed.live = false;
     g_ed.resimFrom = E;
@@ -2634,7 +2643,19 @@ std::vector<PathPt> const& path(int player) { return g_ed.path[player ? 1 : 0]; 
 std::vector<PathPt> const& basePath(int player) { return g_ed.base[player ? 1 : 0]; }
 std::vector<StepInfo> const& info() { return g_ed.info; }
 int knownTo() { return g_ed.knownTo; }
-int deathStep() { return g_ed.deathStep; }
+std::vector<int> deaths() {
+    std::vector<int> out;
+    int n = std::min(g_ed.knownTo, static_cast<int>(g_ed.hit.size()) - 1);
+    for (int s = 0; s <= n; s++)
+        if (g_ed.hit[s] && (s == 0 || !g_ed.hit[s - 1])) out.push_back(s);
+    return out;
+}
+int deathStep() {
+    int n = std::min(g_ed.knownTo, static_cast<int>(g_ed.hit.size()) - 1);
+    for (int s = 0; s <= n; s++) if (g_ed.hit[s]) return s;
+    return -1;
+}
+std::vector<uint8_t> const& hits() { return g_ed.hit; }
 int endStep() { return g_ed.endStep; }
 uint64_t revision() { return g_ed.rev; }
 
@@ -3471,6 +3492,13 @@ class $modify(MacroPlayLayer, PlayLayer) {
     }
 
     void destroyPlayer(PlayerObject* p, GameObject* o) {
+        if (Macro::get().mode == Mode::Editing && !(o && o == m_anticheatSpike)) {
+            // the editor goes through deaths (like noclip) and marks them; GD's
+            // own anti-cheat check object still gets the real call (as noclip
+            // mods do), a hit GD would ignore doesn't count
+            if (p && !p->m_ignoreDamage) g_edHit = true;
+            return;
+        }
         auto td = std::chrono::steady_clock::now();
         PlayLayer::destroyPlayer(p, o);
         if (Macro::get().mode == Mode::Analyzing && !Macro::get().baseline)
@@ -3483,13 +3511,6 @@ class $modify(MacroPlayLayer, PlayLayer) {
         auto& m = Macro::get();
         if (m.mode == Mode::Analyzing && !m.inBeginTest && p && p->m_isDead)
             resolveDeath(m, std::max(0, m.step - 1));
-        if (m.mode == Mode::Editing && p && p->m_isDead && !g_ed.dead) {
-            g_ed.dead = true;
-            g_ed.live = false;
-            g_ed.deathStep = m.step;
-            edStop();
-            edBump();
-        }
         // frame windows on death (normal play / recording, not the macro's own runs)
         if ((m.mode == Mode::Idle || m.mode == Mode::Recording) && p && p->m_isDead
             && !g_deathShown && macroEnabled() && deathMode() != "Off") {

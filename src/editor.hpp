@@ -80,7 +80,9 @@ std::vector<PathPt> const& path(int player);
 std::vector<PathPt> const& basePath(int player);
 std::vector<StepInfo> const& info();
 int knownTo();   // path is known up to this step
-int deathStep(); // -1: no death known
+int deathStep(); // first death, -1: none known
+std::vector<int> deaths(); // every death (first step of each run of hits)
+std::vector<uint8_t> const& hits(); // per step: touched something deadly
 int endStep();   // -1: the end wasn't reached
 // changes whenever any of the above does (the UI redraws on change)
 uint64_t revision();
