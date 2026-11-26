@@ -623,6 +623,7 @@ CheckpointObject* g_respawnCp = nullptr; // set by loadFromCheckpoint, used at t
 int g_stillWatch = 0;   // steps left to watch
 int g_stillFound = 0;   // still steps found after the current respawn
 int g_stillTotal = 0;   // ...in this recording
+int g_stillDiag = 0;    // diagnostic lines logged this recording
 // physics step lengths while recording (a speedhack changes them, and a run
 // stepped differently can't be replayed exactly at 240 steps a second)
 struct DtStats { int steps = 0, odd = 0; double lo = 1e9, hi = 0.0; } g_dt;
@@ -951,7 +952,7 @@ void startRecording() {
     }
     g_cps.clear();
     g_pendingCps.clear();
-    g_stillWatch = g_stillFound = g_stillTotal = 0;
+    g_stillWatch = g_stillFound = g_stillTotal = g_stillDiag = 0;
     g_dt = DtStats{};
     m.track.clear();
     m.step = 0;
@@ -2746,11 +2747,14 @@ class $modify(MacroBGL, GJBaseGameLayer) {
         bool rec = m.mode == Mode::Recording && pcPl && m_player1;
         bool edWatch = m.mode == Mode::Editing && g_ed.stillWatch > 0 && m_player1 && !m_player1->m_isPlatformer
             && static_cast<GJBaseGameLayer*>(PlayLayer::get()) == this && !fw::ghost::isSim();
-        CCPoint ep = edWatch ? m_player1->getPosition() : CCPoint{};
+        // the PHYSICS position (PlayerObject::m_position). Neither GameObject::m_positionX/Y
+        // (v1.19.1-1.21.3) nor the node position (getPosition, v1.21.4-1.21.5) changes
+        // inside one processCommands call, so with those EVERY step looked "still" and
+        // 3 real steps were dropped after each respawn / editor seek.
+        CCPoint ep = edWatch ? m_player1->m_position : CCPoint{};
         bool watchStill = rec && g_stillWatch > 0 && !m_player1->m_isPlatformer;
-        // the node position: updated every step (GameObject::m_positionX/Y is NOT for
-        // the player -- reading it made every step look "still", v1.19.1-1.21.3)
-        CCPoint sp = watchStill ? m_player1->getPosition() : CCPoint{};
+        CCPoint sp = watchStill ? m_player1->m_position : CCPoint{};
+        CCPoint spNode = watchStill ? m_player1->getPosition() : CCPoint{};
         {
             struct Depth { Depth() { g_stepDepth++; } ~Depth() { g_stepDepth--; } } depth; // (GD may throw)
             GJBaseGameLayer::processCommands(dt, isHalfTick, isLastTick);
@@ -2758,7 +2762,7 @@ class $modify(MacroBGL, GJBaseGameLayer) {
         if (!g_pendingCps.empty() && g_stepDepth == 0) snapPendingCheckpoints();
         if (edWatch) {
             g_ed.stillWatch--;
-            if (!m_player1->m_isDead && m_player1->getPosition().equals(ep) && g_ed.stillFound < 3) {
+            if (!m_player1->m_isDead && m_player1->m_position.equals(ep) && g_ed.stillFound < 3) {
                 m.gameTime -= dt; // held still: not a step of the run
                 m.step = static_cast<int>(std::llround(m.gameTime * 240.0));
                 g_ed.stillFound++;
@@ -2770,7 +2774,16 @@ class $modify(MacroBGL, GJBaseGameLayer) {
         }
         if (watchStill) {
             g_stillWatch--;
-            if (!m_player1->m_isDead && m_player1->getPosition().equals(sp) && g_stillFound < 3) {
+            if (g_stillDiag < 6) {
+                // what GD really does in the steps right after a respawn (first respawns only)
+                g_stillDiag++;
+                FW_LOG("PRACTICE respawn diag: step {} dt {:.6f} phys {:.4f},{:.4f} -> {:.4f},{:.4f} "
+                       "node {:.4f},{:.4f} -> {:.4f},{:.4f} dead={} locked={}",
+                    m.step, dt, sp.x, sp.y, m_player1->m_position.x, m_player1->m_position.y,
+                    spNode.x, spNode.y, m_player1->getPositionX(), m_player1->getPositionY(),
+                    m_player1->m_isDead ? 1 : 0, m_player1->m_isLocked ? 1 : 0);
+            }
+            if (!m_player1->m_isDead && m_player1->m_position.equals(sp) && g_stillFound < 3) {
                 // held still: not a step of the run (inputs this step land on the next one)
                 m.gameTime -= dt;
                 m.step = static_cast<int>(std::llround(m.gameTime * 240.0));
